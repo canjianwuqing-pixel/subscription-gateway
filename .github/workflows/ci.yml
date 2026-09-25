@@ -1,0 +1,44 @@
+name: Linux and Docker CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PHP 8.3 and test extensions
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, sodium
+          coverage: none
+      - name: Check PHP extensions and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -r 'foreach (["pdo_sqlite", "sqlite3", "sodium"] as $extension) { if (!extension_loaded($extension)) { fwrite(STDERR, "Missing PHP extension: $extension\n"); exit(1); } }'
+          while IFS= read -r -d '' file; do php -l "$file" >/dev/null; done < <(find sgw tests -type f -name '*.php' -print0)
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do bash -n "$file"; done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
+      - name: Run existing PHP and simulated watcher/operations tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/run.php
+          bash tests/watch_fake.sh
+          bash tests/ops_fake.sh
+      - name: Build and exercise real Docker/Nginx stack
+        shell: bash
+        run: bash tests/ci_docker.sh
