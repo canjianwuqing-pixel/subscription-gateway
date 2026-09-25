@@ -14,8 +14,8 @@ COPY php-production.ini /usr/local/etc/php/conf.d/zz-production-errors.ini
 COPY entrypoint.sh /usr/local/bin/subscription-gateway-admin
 
 RUN chmod 0755 /usr/local/bin/subscription-gateway-admin \
-    && mkdir -p /data /run/nginx \
-    && chown -R www-data:www-data /data \
-    && chmod 0750 /data /run/nginx
+    && mkdir -p /data /control /run/nginx \
+    && chown -R www-data:www-data /data /control \
+    && chmod 0750 /data /control /run/nginx
 
 ENTRYPOINT ["/usr/local/bin/subscription-gateway-admin"]

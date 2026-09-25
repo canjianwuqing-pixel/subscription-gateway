@@ -494,6 +494,8 @@ test_case('logout destroys authenticated Session data', function (): void {
     expect_true(!is_authenticated());
 });
 
+require __DIR__ . '/phase2.php';
+
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";
 } else {

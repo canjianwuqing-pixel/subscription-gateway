@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/rules.php';
+require_once __DIR__ . '/publish.php';
 
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_WINDOW_SECONDS = 600;
@@ -358,6 +358,11 @@ function send_json(array $payload, int $status = 200): never
     exit;
 }
 
+function send_saved_publish_result(array $payload, array $publish): never
+{
+    send_json($payload + ['saved' => true, 'publish' => $publish], $publish['applied'] === true ? 200 : 202);
+}
+
 function handle_api(string $route, string $method): never
 {
     try {
@@ -405,6 +410,9 @@ function handle_api(string $route, string $method): never
         if ($route === '/api/tokens' && $method === 'POST') {
             require_csrf();
             $body = json_request_body();
+            if (($body['state'] ?? 'NORMAL') === 'TEMP_BLOCKED') {
+                throw new InvalidArgumentException('TEMP_BLOCKED enforcement is not available in phase 2');
+            }
             $expiresAt = isset($body['expires_at']) ? (int) $body['expires_at'] : null;
             $id = write_transaction($pdo, static function () use ($pdo, $body, $expiresAt): int {
                 $id = save_token(
@@ -417,7 +425,7 @@ function handle_api(string $route, string $method): never
                 bump_config_version($pdo);
                 return $id;
             });
-            send_json(['ok' => true, 'id' => $id], 201);
+            send_saved_publish_result(['ok' => true, 'id' => $id], publish_current_rules($pdo));
         }
 
         if ($route === '/api/ip-rules' && $method === 'GET') {
@@ -436,7 +444,7 @@ function handle_api(string $route, string $method): never
                 bump_config_version($pdo);
                 return $id;
             });
-            send_json(['ok' => true, 'id' => $id], 201);
+            send_saved_publish_result(['ok' => true, 'id' => $id], publish_current_rules($pdo));
         }
         if (preg_match('#^/api/ip-rules/(\d+)$#D', $route, $match) && $method === 'DELETE') {
             require_csrf();
@@ -444,7 +452,7 @@ function handle_api(string $route, string $method): never
                 delete_rule_by_id($pdo, 'ip_rules', (int) $match[1]);
                 bump_config_version($pdo);
             });
-            send_json(['ok' => true]);
+            send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
         }
 
         if ($route === '/api/ua-rules' && $method === 'GET') {
@@ -463,7 +471,7 @@ function handle_api(string $route, string $method): never
                 bump_config_version($pdo);
                 return $id;
             });
-            send_json(['ok' => true, 'id' => $id], 201);
+            send_saved_publish_result(['ok' => true, 'id' => $id], publish_current_rules($pdo));
         }
         if (preg_match('#^/api/ua-rules/(\d+)$#D', $route, $match) && $method === 'DELETE') {
             require_csrf();
@@ -471,7 +479,7 @@ function handle_api(string $route, string $method): never
                 delete_rule_by_id($pdo, 'ua_rules', (int) $match[1]);
                 bump_config_version($pdo);
             });
-            send_json(['ok' => true]);
+            send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
         }
 
         if ($route === '/api/settings' && $method === 'GET') {
@@ -490,7 +498,47 @@ function handle_api(string $route, string $method): never
             $body = json_request_body();
             [$enabled, $rate, $burst] = validate_rate_request_body($body);
             save_rate_settings($pdo, $enabled, $rate, $burst);
-            send_json(['ok' => true]);
+            send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
+        }
+
+        if ($route === '/api/settings/gateway' && $method === 'GET') {
+            send_json([
+                'ok' => true,
+                'settings' => [
+                    'upstream_url' => setting_get($pdo, 'upstream_url', ''),
+                    'subscribe_path_template' => setting_get($pdo, 'subscribe_path_template'),
+                    'token_query_key' => setting_get($pdo, 'token_query_key'),
+                    'token_format_profile' => setting_get($pdo, 'token_format_profile'),
+                ],
+                'publish' => gateway_publish_status($pdo),
+            ]);
+        }
+        if ($route === '/api/settings/gateway' && $method === 'PATCH') {
+            require_csrf();
+            $body = json_request_body();
+            $settings = validate_gateway_settings([
+                'upstream_url' => $body['upstream_url'] ?? null,
+                'subscribe_path_template' => $body['subscribe_path_template'] ?? null,
+                'token_query_key' => $body['token_query_key'] ?? null,
+                'token_format_profile' => $body['token_format_profile'] ?? null,
+                'rate_enabled' => setting_get($pdo, 'rate_enabled'),
+                'rate_per_minute' => setting_get($pdo, 'rate_per_minute'),
+                'rate_burst' => setting_get($pdo, 'rate_burst'),
+            ]);
+            write_transaction($pdo, static function () use ($pdo, $settings): void {
+                foreach (['upstream_url', 'subscribe_path_template', 'token_query_key', 'token_format_profile'] as $key) {
+                    setting_set($pdo, $key, $settings[$key]);
+                }
+                bump_config_version($pdo);
+            });
+            send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
+        }
+        if ($route === '/api/gateway/status' && $method === 'GET') {
+            send_json(['ok' => true, 'publish' => gateway_publish_status($pdo)]);
+        }
+        if ($route === '/api/gateway/apply' && $method === 'POST') {
+            require_csrf();
+            send_json(['ok' => true, 'publish' => publish_current_rules($pdo)]);
         }
 
         throw new HttpError(404, 'Not found');

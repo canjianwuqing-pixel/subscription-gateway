@@ -3,9 +3,9 @@ set -eu
 
 umask 027
 
-mkdir -p /data /run/nginx
-chown www-data:www-data /data
-chmod 0750 /data /run/nginx
+mkdir -p /data /control /run/nginx
+chown www-data:www-data /data /control
+chmod 0750 /data /control /run/nginx
 
 su-exec www-data php -r '
 require "/app/src/db.php";
