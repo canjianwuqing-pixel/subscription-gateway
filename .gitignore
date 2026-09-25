@@ -1,0 +1,14 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+sgw/data/*
+!sgw/data/.gitkeep
+sgw/control/*
+!sgw/control/.gitkeep
+sgw/logs/*
+!sgw/logs/.gitkeep
+sgw/admin/var/*
+!sgw/admin/var/.gitkeep
+sgw/generated/
+sgw/ssl/
