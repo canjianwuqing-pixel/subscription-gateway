@@ -21,6 +21,12 @@ putenv('TOKEN_ENCRYPTION_KEY=' . base64_encode(str_repeat('E', 32)));
 
 ini_set('session.save_path', $sessionDirectory);
 
+foreach (['PDO', 'pdo_sqlite', 'sqlite3', 'sodium'] as $extension) {
+    if (!extension_loaded($extension)) {
+        throw new RuntimeException("Test PHP is missing required extension: {$extension}");
+    }
+}
+
 require $root . '/sgw/admin/src/api.php';
 
 $passed = 0;
@@ -96,15 +102,7 @@ function remove_test_tree(string $path): void
 /** @return array{process:resource,pipes:array<int,resource>} */
 function spawn_test_worker(string $script, array $arguments = []): array
 {
-    $command = [
-        PHP_BINARY,
-        '-n',
-        '-d', 'extension_dir=' . ini_get('extension_dir'),
-        '-d', 'extension=pdo_sqlite',
-        '-d', 'extension=sodium',
-        $script,
-        ...$arguments,
-    ];
+    $command = [PHP_BINARY, $script, ...$arguments];
     $process = proc_open($command, [
         0 => ['pipe', 'r'],
         1 => ['pipe', 'w'],
@@ -117,6 +115,21 @@ function spawn_test_worker(string $script, array $arguments = []): array
     return ['process' => $process, 'pipes' => $pipes];
 }
 
+function worker_output_excerpt(string|false $output): string
+{
+    $text = (string) $output;
+    foreach (['TOKEN_HMAC_KEY', 'TOKEN_ENCRYPTION_KEY', 'ADMIN_PASSWORD'] as $name) {
+        $secret = getenv($name);
+        if (is_string($secret) && $secret !== '') {
+            $text = str_replace($secret, '[REDACTED]', $text);
+        }
+    }
+    $text = preg_replace('/(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/i', '[REDACTED_TOKEN]', $text) ?? '';
+    $truncated = strlen($text) > 2048;
+    $encoded = json_encode(substr($text, 0, 2048), JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES);
+    return ($encoded === false ? '"[unavailable]"' : $encoded) . ($truncated ? ' (truncated)' : '');
+}
+
 function finish_test_worker(array $worker): string
 {
     $output = stream_get_contents($worker['pipes'][1]);
@@ -124,7 +137,11 @@ function finish_test_worker(array $worker): string
     fclose($worker['pipes'][1]);
     fclose($worker['pipes'][2]);
     $code = proc_close($worker['process']);
-    expect_same(0, $code, 'PHP test worker failed: ' . $errors);
+    if ($code !== 0) {
+        throw new RuntimeException('PHP test worker failed: exit=' . $code
+            . ', stdout=' . worker_output_excerpt($output)
+            . ', stderr=' . worker_output_excerpt($errors));
+    }
     return trim((string) $output);
 }
 
