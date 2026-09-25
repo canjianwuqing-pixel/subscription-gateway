@@ -65,6 +65,7 @@ export STAGING_DIR="$test_root/staging"
 export NGINX_CONFIG="$test_root/nginx.conf"
 export NGINX_BIN="$test_root/fake/nginx"
 export FAKE_NGINX_STATE="$test_root/fake"
+export TEMP_EXPIRY_INTERVAL_SECONDS=1
 
 bash "$(dirname "$0")/../sgw/gateway/watcher.sh" > "$test_root/watcher.stderr" 2>&1 &
 watcher_pid=$!
@@ -116,4 +117,12 @@ jq -e '.ok==false and .error_code=="HASH_MISMATCH"' "$CONTROL_DIR/result.json" >
 [[ $(cat "$GENERATED_DIR/rules.conf") == GOOD_RULES ]]
 ! grep -Fq TEST_SECRET_TOKEN "$CONTROL_DIR/result.json"
 
-echo 'PASS: 5 fake watcher scenarios (not an Nginx integration test)'
+expired=$(( $(date +%s) - 1 ))
+submit 55555555555555555555555555555555 5 $'map $arg_token $token_state {\n    # SGW_TEMP_BLOCK '"$expired"$' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa TEMP_BLOCKED;\n}'
+for attempt in {1..40}; do
+    ! grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa TEMP_BLOCKED;' "$GENERATED_DIR/rules.conf" && break
+    sleep 0.1
+done
+! grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa TEMP_BLOCKED;' "$GENERATED_DIR/rules.conf"
+
+echo 'PASS: 6 fake watcher scenarios (not an Nginx integration test)'

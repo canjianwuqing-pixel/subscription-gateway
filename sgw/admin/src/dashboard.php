@@ -1,49 +1,42 @@
 <?php
-
 declare(strict_types=1);
-
 $basePath = '/' . app_config()['admin_secret_path'];
-$username = htmlspecialchars((string) $_SESSION['admin_username'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-$csrf = htmlspecialchars(csrf_token(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 ?>
 <!doctype html>
-<html lang="zh-CN">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="csrf-token" content="<?= $csrf ?>">
-    <title>Subscription Gateway Admin</title>
-    <style>
-        :root{color-scheme:dark;font:13px/1.4 system-ui,sans-serif;background:#080e17;color:#d8e3f0}
-        *{box-sizing:border-box}body{margin:0}.top{height:42px;border-bottom:1px solid #27364a;padding:0 14px;display:flex;align-items:center;justify-content:space-between;background:#0d1521}
-        main{padding:14px}.panel{max-width:900px;border:1px solid #26364a;background:#101927;padding:14px}
-        h1{font-size:16px;margin:0}h2{font-size:14px;margin:0 0 10px}.muted{color:#91a4ba}
-        button{height:30px;border:1px solid #30435b;background:#142238;color:#d8e3f0;padding:0 11px;cursor:pointer}
-        code{color:#7fd7e5}
-    </style>
-</head>
-<body>
-<header class="top">
-    <h1>Subscription Gateway</h1>
-    <div><?= $username ?>　<button id="logout">退出</button></div>
-</header>
-<main>
-    <section class="panel">
-        <h2>第一阶段基础已启用</h2>
-        <p>SQLite、Token加密、管理员认证、Session、CSRF和输入验证已经建立。</p>
-        <p class="muted">Gateway规则、分析页面和安全reload将在后续阶段实现。本页面不会修改Gateway行为。</p>
-        <p>API入口：<code><?= htmlspecialchars($basePath, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>/api/</code></p>
-    </section>
-</main>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf-token" content="<?= htmlspecialchars(csrf_token(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+<title>Subscription Gateway</title>
+<style>
+:root{color-scheme:dark;font:12px/1.4 system-ui,sans-serif;background:#0b111b;color:#d8e3ef}
+*{box-sizing:border-box}body{margin:0;display:flex;min-height:100vh}nav{width:146px;flex:none;background:#0e1724;border-right:1px solid #263549;padding:12px 7px}nav h1{font-size:14px;color:#76cfe0;margin:2px 8px 16px}nav button{display:block;width:100%;text-align:left;margin:2px 0;border:0;background:transparent;color:#a8bbcf;padding:9px 10px;cursor:pointer}nav button.active,nav button:hover{background:#142b3d;color:#def6ff}main{min-width:0;flex:1;padding:12px 16px}header{height:34px;display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}h2{font-size:16px;margin:0}.toolbar,.stats,.formrow{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:7px 0}.stats span{border:1px solid #2b3d51;background:#121d2b;padding:5px 9px}.box{border:1px solid #29394d;background:#111b29;padding:10px;margin:8px 0}.scroll{max-height:75vh;overflow:auto;border:1px solid #29394d}table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}th,td{padding:6px 7px;border-bottom:1px solid #263446;text-align:left;height:36px}th{background:#172436;color:#a8bed4;position:sticky;top:0}tr:hover td{background:#152336}button,input,select{font:inherit;color:#d8e3ef;background:#172537;border:1px solid #38506a;padding:5px 8px;border-radius:3px}button{cursor:pointer}button:hover{border-color:#6ba9bf}.danger{color:#ff9ba8}.good{color:#5ce3a2}.muted{color:#8fa5bb}.pill{display:inline-block;margin-right:3px;border:1px solid #486073;padding:1px 4px}label{display:inline-flex;align-items:center;gap:5px}input{min-width:150px}input[type=number]{min-width:65px;width:95px}#message{min-height:19px;color:#f5c16c}dialog{background:#111b29;color:#d8e3ef;border:1px solid #405875;max-width:95vw;max-height:90vh;overflow:auto;width:min(1000px,95vw)}dialog::backdrop{background:#0009}.token-short{font-family:monospace;color:#7bd3e6}.wrap{white-space:normal;max-width:240px;overflow-wrap:anywhere}@media(max-width:700px){nav{width:95px}main{padding:8px}.scroll{max-height:70vh}}
+</style></head><body>
+<nav><h1>SGW</h1><div id="menu"></div><button id="logout">退出</button></nav>
+<main><header><h2 id="title">概览</h2><span id="identity" class="muted"></span></header><div id="message"></div><div id="content"></div></main>
+<dialog id="detail"><div class="toolbar"><strong>Token 详情</strong><button id="close-detail">关闭</button></div><div id="detail-content"></div></dialog>
 <script>
-const base = <?= json_encode($basePath, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-const csrf = document.querySelector('meta[name="csrf-token"]').content;
-document.getElementById('logout').addEventListener('click', async () => {
-    const response = await fetch(base + '/api/logout', {
-        method: 'POST', credentials: 'same-origin', headers: {'X-CSRF-Token': csrf}
-    });
-    if (response.ok) location.replace(base + '/');
-});
-</script>
-</body>
-</html>
+const base=<?= json_encode($basePath, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT) ?>;
+const csrf=document.querySelector('meta[name="csrf-token"]').content;
+const content=document.getElementById('content'),msg=document.getElementById('message');
+const pages=['概览','分析','日志','Token','IP规则','UA规则','设置'];
+function node(tag,value='',cls=''){const x=document.createElement(tag);x.textContent=value;if(cls)x.className=cls;return x}
+function add(parent,...children){parent.append(...children);return parent}
+function field(label,value='',type='text'){const l=node('label',label),i=node('input');i.type=type;i.value=value;l.append(i);return[l,i]}
+function btn(text,run,cls=''){const b=node('button',text,cls);b.onclick=()=>Promise.resolve(run()).catch(e=>notice(e.message,true));return b}
+function table(headers,rows){const box=node('div','','scroll'),t=node('table'),head=node('tr');headers.forEach(h=>head.append(node('th',h)));t.append(add(node('thead'),head));const body=node('tbody');rows.forEach(items=>{const tr=node('tr');items.forEach(item=>{const td=node('td');if(item instanceof Node)td.append(item);else td.textContent=item??'—';tr.append(td)});body.append(tr)});t.append(body);box.append(t);return box}
+function notice(text,error=false){msg.textContent=text;msg.style.color=error?'#ff91a0':'#74dfa7'}
+async function api(path,method='GET',data){const r=await fetch(base+'/api/'+path,{method,credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:data===undefined?undefined:JSON.stringify(data)});let value;try{value=await r.json()}catch{throw Error('响应不是JSON')}if(!r.ok||!value.ok)throw Error(value.error||'请求失败');return value}
+async function show(page){document.getElementById('title').textContent=page;content.replaceChildren();msg.textContent='';document.querySelectorAll('#menu button').forEach(b=>b.classList.toggle('active',b.textContent===page));try{await render[page]()}catch(e){notice(e.message,true)}}
+function fmtTime(v){return v?new Date(Number(v)*1000).toLocaleString():'—'}
+async function fullToken(id){return(await api('tokens/'+id+'/full')).token}
+async function copyToken(id){await navigator.clipboard.writeText(await fullToken(id));notice('完整 Token 已复制')}
+function short(id,hint){return btn(hint+' 复制',()=>copyToken(id),'token-short')}
+async function stateChange(id,state,expires_at=null){if(!confirm('确认将 Token 状态改为 '+state+'？'))return;const value=await api('tokens/'+id+'/state','PATCH',{state,expires_at});await show('分析');notice(value.publish.applied===true?'规则已应用':'状态已保存，Gateway 应用待确认')}
+async function overview(){const o=(await api('overview')).overview,p=o.publish,bar=node('div','','stats');[['入口',o.gateway_domain],['上游',o.upstream_url||'未配置（Fail-Closed）'],['规则版本',p.config_version+' / '+p.active_version],['今日请求',o.today.requests],['今日Token',o.today.tokens],['今日IP',o.today.ips],['403',o.today.blocked],['429',o.today.rate_limited],['数据库',o.database_bytes+' B'],['证书到期',fmtTime(o.certificate_expires_at)]].forEach(([k,v])=>bar.append(node('span',k+'：'+(v??'—'))));content.append(bar);if(!o.upstream_url)content.append(node('div','上游尚未配置，Gateway 处于 Fail-Closed 状态。','box danger'));content.append(btn('重新应用当前规则',async()=>{const x=await api('gateway/apply','POST');notice(x.publish.applied===true?'规则已应用':'应用待确认/失败')}))}
+async function analysis(){const rows=(await api('analysis/tokens?limit=50')).rows,bar=node('div','','toolbar');add(bar,node('span','最近 50 个 Token · 完整值按需读取'),btn('刷新',()=>show('分析')));content.append(bar);content.append(table(['健康','Token','1m','5m','1h','24h','IP','UA','错误','最后IP','最后UA','最后访问','状态','风险','操作'],rows.map(r=>{const actions=node('span');add(actions,btn('详情',()=>detail(r.id)),btn('白名单',()=>stateChange(r.id,'WHITELIST')),btn('永久封停',()=>stateChange(r.id,'BLOCKED')));add(actions,btn('临时封停',()=>{const hours=prompt('封停小时数：1、24、168，或输入自定义小时数','1');if(hours===null)return;const n=Number(hours);if(!Number.isFinite(n)||n<=0||n>8760){notice('小时数无效',true);return}return stateChange(r.id,'TEMP_BLOCKED',Math.floor(Date.now()/1000+n*3600))}),btn('解封',()=>stateChange(r.id,'NORMAL')),btn('重置',()=>stateChange(r.id,'NORMAL')));const risk=node('span');(r.labels.length?r.labels:['正常']).forEach(label=>risk.append(node('span',label,'pill')));return[r.health,short(r.id,r.token_hint),r.requests_1m,r.requests_5m,r.requests_1h,r.requests_24h,r.ips_24h,r.uas_24h,r.errors_24h,r.last_ip,node('span',r.last_ua||'—','wrap'),fmtTime(r.last_seen),r.state,risk,actions]})))}
+async function detail(id,window='24h'){const d=(await api('tokens/'+id+'/detail?window='+window)).detail,area=document.getElementById('detail-content');area.replaceChildren();const bar=node('div','','toolbar');add(bar,node('span','状态：'+d.token.state+'　总请求：'+d.token.request_count+'　首次：'+fmtTime(d.token.first_seen)+'　最后：'+fmtTime(d.token.last_seen)),btn('显示完整 Token',async()=>area.prepend(node('code',await fullToken(id)))),btn('复制',()=>copyToken(id)));area.append(bar);const windows=node('div','','toolbar');['1h','24h','7d','30d'].forEach(w=>windows.append(btn(w,()=>detail(id,w))));area.append(windows);area.append(table(['时间','IP','UA','状态','路径','决策'],d.logs.map(l=>[fmtTime(l.created_at),l.client_ip,node('span',l.user_agent,'wrap'),l.status_code,l.request_path,l.decision])));area.append(node('h3','IP 汇总'));area.append(table(['IP','次数'],d.groups.ip.map(x=>[x.value,x.count])));area.append(node('h3','UA 汇总'));area.append(table(['UA','次数'],d.groups.ua.map(x=>[x.value,x.count])));if(!document.getElementById('detail').open)document.getElementById('detail').showModal()}
+async function tokenPage(){const bar=node('div','','toolbar'),[label,input]=field('完整 Token'),select=node('select');['NORMAL','WHITELIST','BLOCKED'].forEach(x=>select.append(node('option',x)));add(bar,label,select,btn('手动添加',async()=>{const result=await api('tokens','POST',{token:input.value,state:select.value});await show('Token');notice(result.publish.applied===true?'已应用':'已保存，待应用')}));content.append(bar);await analysis()}
+async function logs(page=1){content.replaceChildren();const bar=node('div','','toolbar'),range=node('select');['1h','24h','7d','30d'].forEach(x=>range.append(node('option',x)));range.value='24h';const [lip,ip]=field('IP'),[lua,ua]=field('UA'),[ls,status]=field('状态码','','number'),[ld,decision]=field('决策'),[lt,tokenId]=field('Token ID','','number');add(bar,range,lip,lua,ls,ld,lt);content.append(bar);const pager=node('div','','toolbar');content.append(pager);async function load(p){const query=new URLSearchParams({window:range.value,page:p});if(ip.value)query.set('ip',ip.value);if(ua.value)query.set('ua',ua.value);if(status.value)query.set('status',status.value);if(decision.value)query.set('decision',decision.value);if(tokenId.value)query.set('token_id',tokenId.value);const result=(await api('logs?'+query)).result,old=content.querySelector('.scroll');if(old)old.remove();content.append(table(['时间','Token ID','IP','UA','状态','路径','决策'],result.rows.map(r=>[fmtTime(r.created_at),r.token_id,r.client_ip,node('span',r.user_agent,'wrap'),r.status_code,r.request_path,r.decision])));pager.replaceChildren(node('span','第 '+result.page+' 页'),btn('上一页',()=>load(Math.max(1,p-1))),btn('下一页',()=>load(p+1)))}bar.append(btn('查询',()=>load(1)));await load(page)}
+async function rules(kind){const path=kind==='IP规则'?'ip-rules':'ua-rules',name=kind==='IP规则'?'network':'pattern',rows=(await api(path)).rules,bar=node('div','','toolbar'),[label,input]=field(kind==='IP规则'?'IPv4/CIDR':'UA 包含'),[remark,note]=field('备注'),action=node('select');['WHITELIST','BLACKLIST'].forEach(x=>action.append(node('option',x)));add(bar,label,action,remark,btn('添加',async()=>{await api(path,'POST',{[name]:input.value,action:action.value,note:note.value});show(kind)}));content.append(bar);content.append(table([kind==='IP规则'?'IPv4/CIDR':'Pattern','状态','备注','创建时间','操作'],rows.map(r=>[r[name],r.action,r.note,fmtTime(r.created_at),btn('删除',async()=>{if(!confirm('确认删除规则？'))return;await api(path+'/'+r.id,'DELETE');show(kind)},'danger')])))}
+async function settings(){const[gateway,rates,summary]=await Promise.all([api('settings/gateway'),api('settings'),api('overview')]),g=gateway.settings,s=rates.settings,o=summary.overview,box=node('div','','box');box.append(node('div','部署层（只读）：入口 '+(o.gateway_domain||'—')+' · Admin 端口 '+(o.admin_port||'—')+' · 后台路径 '+base+' · 证书到期 '+fmtTime(o.certificate_expires_at)+' · 可信代理 '+(o.trusted_proxy_ips||'未配置'),'muted'));const bar=node('div','','formrow'),[lu,upstream]=field('上游 Origin',g.upstream_url),[lk,key]=field('Token 参数名',g.token_query_key),[lr,rate]=field('每分钟请求',s.rate_per_minute,'number'),[lb,burst]=field('Burst',s.rate_burst,'number'),[ld,days]=field('日志保留天数',s.log_retention_days,'number'),enabled=node('input');enabled.type='checkbox';enabled.checked=s.rate_enabled;add(bar,lu,lk,node('span','路径：'+g.subscribe_path_template),node('span','格式：'+g.token_format_profile));add(bar,add(node('label','限速 '),enabled),lr,lb,ld);box.append(bar);box.append(btn('保存网关设置',async()=>{const result=await api('settings/gateway','PATCH',{upstream_url:upstream.value,subscribe_path_template:g.subscribe_path_template,token_query_key:key.value,token_format_profile:g.token_format_profile});notice(result.publish.applied===true?'网关规则已应用':'已保存，应用待确认')}));box.append(btn('保存限速',async()=>{const result=await api('settings/rate','PATCH',{rate_enabled:enabled.checked,rate_per_minute:Number(rate.value),rate_burst:Number(burst.value)});notice(result.publish.applied===true?'限速规则已应用':'已保存，应用待确认')}));box.append(btn('保存保留天数',async()=>{await api('settings/retention','PATCH',{log_retention_days:Number(days.value)});notice('已保存')}));content.append(box);const passwordBox=node('div','','box'),[lc,current]=field('当前密码','','password'),[ln,replacement]=field('新密码','','password');passwordBox.append(node('strong','修改管理员密码'));add(passwordBox,lc,ln,btn('修改密码',async()=>{await api('admin/password','PATCH',{current_password:current.value,new_password:replacement.value});current.value='';replacement.value='';notice('密码已更新，其他 Session 已失效')}));content.append(passwordBox)}
+const render={'概览':overview,'分析':analysis,'日志':logs,'Token':tokenPage,'IP规则':()=>rules('IP规则'),'UA规则':()=>rules('UA规则'),'设置':settings};pages.forEach(p=>document.getElementById('menu').append(btn(p,()=>show(p))));document.getElementById('logout').onclick=async()=>{await api('logout','POST');location.replace(base+'/')};document.getElementById('close-detail').onclick=()=>document.getElementById('detail').close();document.getElementById('identity').textContent=<?= json_encode((string) $_SESSION['admin_username'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT) ?>;show('概览');
+</script></body></html>

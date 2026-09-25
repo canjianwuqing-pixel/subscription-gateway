@@ -1,4 +1,6 @@
 .env
+sgw/.env.*
+!sgw/.env.example
 *.db
 *.db-shm
 *.db-wal
@@ -12,3 +14,4 @@ sgw/admin/var/*
 !sgw/admin/var/.gitkeep
 sgw/generated/
 sgw/ssl/
+sgw/runtime/

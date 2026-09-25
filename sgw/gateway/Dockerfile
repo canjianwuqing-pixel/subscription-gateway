@@ -1,6 +1,6 @@
 FROM nginx:alpine
 
-RUN apk add --no-cache bash jq coreutils
+RUN apk add --no-cache bash jq coreutils ca-certificates
 
 COPY nginx.conf /etc/nginx/nginx.conf.template
 COPY entrypoint.sh watcher.sh /usr/local/bin/

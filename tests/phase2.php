@@ -53,12 +53,13 @@ test_case('WHITELIST token emits a whitelist map entry', function () use ($phase
     expect_true(str_contains(phase2_rules($phase2Pdo), '    ' . $token . ' WHITELIST;'));
 });
 
-test_case('TEMP_BLOCKED is reported but not enforced', function () use ($phase2Pdo): void {
+test_case('TEMP_BLOCKED is emitted with an expiry marker', function () use ($phase2Pdo): void {
     $token = '44444444444444444444444444444444';
     save_token($phase2Pdo, $token, 'TEMP_BLOCKED', time() + 600);
     $compiled = compile_gateway_rules($phase2Pdo);
-    expect_same(1, $compiled['ignored_temp_blocked']);
-    expect_true(!str_contains($compiled['rules'], $token));
+    expect_same(0, $compiled['ignored_temp_blocked']);
+    expect_true(str_contains($compiled['rules'], $token . ' TEMP_BLOCKED;'));
+    expect_true(str_contains($compiled['rules'], 'SGW_TEMP_BLOCK'));
 });
 
 test_case('IP black and white networks compile into geo', function () use ($phase2Pdo): void {
@@ -219,7 +220,7 @@ PHP);
     $worker = spawn_test_worker($script, [$controlTest]);
     $result = publish_current_rules($phase2Pdo);
     finish_test_worker($worker);
-    expect_same(true, $result['applied']);
+    expect_same(true, $result['applied'], 'Publish result: ' . json_encode($result));
     $request = json_decode((string) file_get_contents($controlTest . '/request.json'), true);
     expect_same(hash_file('sha256', $controlTest . '/candidate.conf'), $request['sha256']);
     expect_same(9, $request['version']);

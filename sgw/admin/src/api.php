@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/publish.php';
+require_once __DIR__ . '/analytics.php';
 
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_WINDOW_SECONDS = 600;
@@ -99,10 +100,17 @@ function validate_origin_and_host(): void
 
 function is_authenticated(): bool
 {
-    return isset($_SESSION['admin_id'], $_SESSION['admin_username'])
+    if (!(isset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['auth_version'])
         && is_int($_SESSION['admin_id'])
         && $_SESSION['admin_id'] > 0
-        && is_string($_SESSION['admin_username']);
+        && is_string($_SESSION['admin_username'])
+        && is_int($_SESSION['auth_version']))) {
+        return false;
+    }
+    $statement = open_database((string) app_config()['database_path'])
+        ->prepare('SELECT auth_version FROM admins WHERE id = :id');
+    $statement->execute([':id' => $_SESSION['admin_id']]);
+    return (int) $statement->fetchColumn() === $_SESSION['auth_version'];
 }
 
 function require_authentication(): void
@@ -120,6 +128,7 @@ function complete_login_session(array $admin): void
     $_SESSION = [
         'admin_id' => (int) $admin['id'],
         'admin_username' => (string) $admin['username'],
+        'auth_version' => (int) ($admin['auth_version'] ?? 1),
         'csrf_token' => bin2hex(random_bytes(32)),
         'logged_in_at' => time(),
     ];
@@ -404,15 +413,50 @@ function handle_api(string $route, string $method): never
 
         require_authentication();
 
+        if ($route === '/api/overview' && $method === 'GET') {
+            send_json(['ok' => true, 'overview' => overview_data($pdo)]);
+        }
+        if ($route === '/api/analysis/tokens' && $method === 'GET') {
+            send_json(['ok' => true, 'rows' => token_analysis_rows($pdo, (int) ($_GET['limit'] ?? 50))]);
+        }
+        if ($route === '/api/logs' && $method === 'GET') {
+            send_json(['ok' => true, 'result' => access_log_page($pdo, $_GET)]);
+        }
+        if (preg_match('#^/api/tokens/(\d+)/full$#D', $route, $match) && $method === 'GET') {
+            $statement = $pdo->prepare('SELECT token_encrypted FROM tokens WHERE id = :id');
+            $statement->execute([':id' => (int) $match[1]]);
+            $encrypted = $statement->fetchColumn();
+            if (!is_string($encrypted)) throw new HttpError(404, 'Token not found');
+            send_json(['ok' => true, 'token' => decrypt_token($encrypted)]);
+        }
+        if (preg_match('#^/api/tokens/(\d+)/detail$#D', $route, $match) && $method === 'GET') {
+            $detail = token_detail_data($pdo, (int) $match[1], (string) ($_GET['window'] ?? '24h'));
+            if ($detail === null) throw new HttpError(404, 'Token not found');
+            send_json(['ok' => true, 'detail' => $detail]);
+        }
+        if (preg_match('#^/api/tokens/(\d+)/state$#D', $route, $match) && $method === 'PATCH') {
+            require_csrf();
+            $body = json_request_body();
+            $state = (string) ($body['state'] ?? '');
+            $expiresAt = isset($body['expires_at']) ? (int) $body['expires_at'] : null;
+            write_transaction($pdo, static function () use ($pdo, $match, $state, $expiresAt): void {
+                $lookup = $pdo->prepare('SELECT token_encrypted, note FROM tokens WHERE id = :id');
+                $lookup->execute([':id' => (int) $match[1]]);
+                $row = $lookup->fetch();
+                if (!is_array($row)) throw new HttpError(404, 'Token not found');
+                save_token($pdo, decrypt_token((string) $row['token_encrypted']), $state,
+                    $expiresAt, (string) $row['note']);
+                bump_config_version($pdo);
+            });
+            send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
+        }
+
         if ($route === '/api/tokens' && $method === 'GET') {
-            send_json(['ok' => true, 'tokens' => list_tokens_for_admin($pdo)]);
+            send_json(['ok' => true, 'tokens' => token_analysis_rows($pdo)]);
         }
         if ($route === '/api/tokens' && $method === 'POST') {
             require_csrf();
             $body = json_request_body();
-            if (($body['state'] ?? 'NORMAL') === 'TEMP_BLOCKED') {
-                throw new InvalidArgumentException('TEMP_BLOCKED enforcement is not available in phase 2');
-            }
             $expiresAt = isset($body['expires_at']) ? (int) $body['expires_at'] : null;
             $id = write_transaction($pdo, static function () use ($pdo, $body, $expiresAt): int {
                 $id = save_token(
@@ -489,6 +533,7 @@ function handle_api(string $route, string $method): never
                     'rate_enabled' => setting_get($pdo, 'rate_enabled', '1') === '1',
                     'rate_per_minute' => (int) setting_get($pdo, 'rate_per_minute', '20'),
                     'rate_burst' => (int) setting_get($pdo, 'rate_burst', '5'),
+                    'log_retention_days' => (int) setting_get($pdo, 'log_retention_days', '30'),
                     'config_version' => (int) setting_get($pdo, 'config_version', '0'),
                 ],
             ]);
@@ -499,6 +544,16 @@ function handle_api(string $route, string $method): never
             [$enabled, $rate, $burst] = validate_rate_request_body($body);
             save_rate_settings($pdo, $enabled, $rate, $burst);
             send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
+        }
+        if ($route === '/api/settings/retention' && $method === 'PATCH') {
+            require_csrf();
+            $body = json_request_body();
+            $days = $body['log_retention_days'] ?? null;
+            if (!is_int($days) || $days < 1 || $days > 3650) {
+                throw new InvalidArgumentException('log_retention_days must be 1-3650');
+            }
+            setting_set($pdo, 'log_retention_days', (string) $days);
+            send_json(['ok' => true]);
         }
 
         if ($route === '/api/settings/gateway' && $method === 'GET') {
@@ -539,6 +594,15 @@ function handle_api(string $route, string $method): never
         if ($route === '/api/gateway/apply' && $method === 'POST') {
             require_csrf();
             send_json(['ok' => true, 'publish' => publish_current_rules($pdo)]);
+        }
+        if ($route === '/api/admin/password' && $method === 'PATCH') {
+            require_csrf();
+            $body = json_request_body();
+            $version = change_admin_password($pdo, $_SESSION['admin_id'],
+                (string) ($body['current_password'] ?? ''), (string) ($body['new_password'] ?? ''));
+            $_SESSION['auth_version'] = $version;
+            session_regenerate_id(true);
+            send_json(['ok' => true]);
         }
 
         throw new HttpError(404, 'Not found');

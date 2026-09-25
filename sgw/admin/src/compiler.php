@@ -96,15 +96,35 @@ function compile_gateway_rules(PDO $pdo): array
         '    default 0;',
         '    "~^[0-9a-f]{32}$" 1;',
         '}',
+        'map $args $token_query_duplicate {',
+        '    default 0;',
+        '    ' . nginx_quoted('~*(?:^|&)' . preg_quote($settings['token_query_key'])
+            . '(?:=[^&]*)?(?:&[^&]*)*&' . preg_quote($settings['token_query_key']) . '(?:=|&|$)') . ' 1;',
+        '}',
+        'map $args $token_query_unsafe { default 0; "~;|(?:^|&)[^=&%]*%" 1; }',
+        'map "$token_valid:$token_query_duplicate:$token_query_unsafe" $token_event_loggable '
+            . '{ default 0; "1:0:0" 1; }',
+        'log_format token_events escape=json',
+        '    ' . nginx_quoted('{"time":$msec,"token":"$arg_' . $settings['token_query_key']
+            . '","ip":"$remote_addr","ua":"$http_user_agent","status":$status,'
+            . '"path":"$uri","policy":"$log_decision"}') . ';',
         'map $arg_' . $settings['token_query_key'] . ' $token_state {',
         '    default NORMAL;',
     ];
     $ignoredTemp = 0;
-    $tokens = $pdo->query('SELECT token_encrypted, state FROM tokens ORDER BY token_hash')->fetchAll();
+    $tokens = $pdo->query('SELECT token_encrypted, state, expires_at FROM tokens ORDER BY token_hash')->fetchAll();
     foreach ($tokens as $row) {
         $state = (string) $row['state'];
         if ($state === 'TEMP_BLOCKED') {
-            $ignoredTemp++;
+            $expiresAt = (int) $row['expires_at'];
+            if ($expiresAt <= time()) {
+                $ignoredTemp++;
+                continue;
+            }
+            $token = decrypt_token((string) $row['token_encrypted']);
+            validate_token_format($token);
+            $lines[] = '    # SGW_TEMP_BLOCK ' . $expiresAt . ' ' . $token;
+            $lines[] = '    ' . $token . ' TEMP_BLOCKED;';
             continue;
         }
         if (!in_array($state, ['BLOCKED', 'WHITELIST'], true)) {
@@ -142,15 +162,21 @@ function compile_gateway_rules(PDO $pdo): array
         'map "$token_state:$ip_state:$ua_whitelisted:$ua_blacklisted" $policy_reason {',
         '    default PASS;',
         '    ~^BLOCKED: TOKEN_BLOCKED;',
+        '    ~^TEMP_BLOCKED: TOKEN_TEMP_BLOCKED;',
         '    ~^[^:]+:BLACKLIST: IP_BLACKLIST;',
         '    ~^WHITELIST: TOKEN_WHITELIST;',
         '    ~^[^:]+:WHITELIST: IP_WHITELIST;',
         '    ~^[^:]+:[^:]+:1: UA_WHITELIST;',
         '    ~^[^:]+:[^:]+:0:1$ UA_BLACKLIST;',
         '}',
+        'map "$limit_req_status:$policy_reason" $log_decision {',
+        '    default $policy_reason;',
+        '    ~^REJECTED: RATE_LIMIT;',
+        '}',
         'map $policy_reason $policy_block {',
         '    default 0;',
         '    TOKEN_BLOCKED 1;',
+        '    TOKEN_TEMP_BLOCKED 1;',
         '    IP_BLACKLIST 1;',
         '    UA_BLACKLIST 1;',
         '}',

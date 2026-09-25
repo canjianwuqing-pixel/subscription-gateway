@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-const DATABASE_SCHEMA_VERSION = 1;
+const DATABASE_SCHEMA_VERSION = 2;
 
 function env_required(string $name): string
 {
@@ -239,6 +239,13 @@ SQL);
             }
 
             $pdo->exec('PRAGMA user_version=1');
+            $version = 1;
+        }
+        if ($version === 1) {
+            $pdo->exec('ALTER TABLE admins ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1');
+            $statement = $pdo->prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (:key, :value, :time)');
+            $statement->execute([':key' => 'log_retention_days', ':value' => '30', ':time' => time()]);
+            $pdo->exec('PRAGMA user_version=2');
         }
         $pdo->commit();
     } catch (Throwable $error) {
@@ -356,7 +363,7 @@ function insert_admin_hash(PDO $pdo, string $username, string $passwordHash): in
 /** @return array{id:int,username:string}|null */
 function authenticate_admin(PDO $pdo, string $username, string $password): ?array
 {
-    $statement = $pdo->prepare('SELECT id, username, password_hash FROM admins WHERE username = :username');
+    $statement = $pdo->prepare('SELECT id, username, password_hash, auth_version FROM admins WHERE username = :username');
     $statement->execute([':username' => trim($username)]);
     $row = $statement->fetch();
 
@@ -379,5 +386,30 @@ function authenticate_admin(PDO $pdo, string $username, string $password): ?arra
         ]);
     }
 
-    return ['id' => (int) $row['id'], 'username' => (string) $row['username']];
+    return ['id' => (int) $row['id'], 'username' => (string) $row['username'],
+        'auth_version' => (int) $row['auth_version']];
+}
+
+function change_admin_password(PDO $pdo, int $id, string $current, string $replacement): int
+{
+    if (strlen($replacement) < 16 || strlen($replacement) > 1024
+        || !preg_match('/[a-z]/', $replacement) || !preg_match('/[A-Z]/', $replacement)
+        || !preg_match('/[0-9]/', $replacement)
+    ) {
+        throw new InvalidArgumentException('New password needs 16+ characters with upper, lower and digit');
+    }
+    return write_transaction($pdo, static function () use ($pdo, $id, $current, $replacement): int {
+        $query = $pdo->prepare('SELECT password_hash FROM admins WHERE id = :id');
+        $query->execute([':id' => $id]);
+        $old = $query->fetchColumn();
+        if (!is_string($old) || !password_verify($current, $old)) {
+            throw new DomainException('Current password is incorrect');
+        }
+        $update = $pdo->prepare('UPDATE admins SET password_hash = :hash, auth_version = auth_version + 1, '
+            . 'updated_at = :updated WHERE id = :id');
+        $update->execute([':hash' => password_hash_secure($replacement), ':updated' => time(), ':id' => $id]);
+        $version = $pdo->prepare('SELECT auth_version FROM admins WHERE id = :id');
+        $version->execute([':id' => $id]);
+        return (int) $version->fetchColumn();
+    });
 }

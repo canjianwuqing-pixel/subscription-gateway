@@ -43,6 +43,20 @@ fail_request() {
     write_result false "$1" "$request_id" "$request_version" "$request_sha"
 }
 
+write_test_config() {
+    local source=$1 target=$2 line replaced=0
+    : > "$target"
+    while IFS= read -r line; do
+        if [[ $line == "    include $generated/rules.conf;" ]]; then
+            printf '    include %s;\n' "$source" >> "$target"
+            replaced=1
+        else
+            printf '%s\n' "$line" >> "$target"
+        fi
+    done < "$nginx_config"
+    (( replaced == 1 ))
+}
+
 restore_previous_rules() {
     cp -- "$rules.bak" "$rules.restore" && chmod 0640 "$rules.restore" \
         && sync -f "$rules.restore" && mv -f -- "$rules.restore" "$rules" \
@@ -79,17 +93,7 @@ process_request() {
     actual=$(sha256sum "$staging/rules.candidate.conf") || { fail_request STAGING_FAILED; return; }
     [[ ${actual%% *} == "$request_sha" ]] || { fail_request HASH_MISMATCH; return; }
     test_config=$staging/nginx-test.conf
-    local replaced=0 line
-    : > "$test_config"
-    while IFS= read -r line; do
-        if [[ $line == "    include $generated/rules.conf;" ]]; then
-            printf '    include %s/rules.candidate.conf;\n' "$staging" >> "$test_config"
-            replaced=1
-        else
-            printf '%s\n' "$line" >> "$test_config"
-        fi
-    done < "$nginx_config"
-    if (( replaced != 1 )); then
+    if ! write_test_config "$staging/rules.candidate.conf" "$test_config"; then
         fail_request STAGING_FAILED
         return
     fi
@@ -128,9 +132,78 @@ process_request() {
     write_result true OK "$request_id" "$request_version" "$request_sha"
 }
 
+expire_temp_blocks() {
+    local now=$1 expiry_rules=$staging/rules.expiry.conf expiry_test=$staging/nginx-expiry.conf
+    [[ -f $rules && ! -L $rules ]] || return 0
+    awk -v now="$now" '
+        drop != "" {
+            if ($0 != "    " drop " TEMP_BLOCKED;") exit 2
+            drop=""
+            next
+        }
+        $1 == "#" && $2 == "SGW_TEMP_BLOCK" && $3 ~ /^[0-9]+$/ &&
+            $4 ~ /^[0-9a-f]+$/ && length($4) == 32 && NF == 4 && $3 <= now {
+            drop=$4
+            next
+        }
+        { print }
+        END { if (drop != "") exit 2 }
+    ' "$rules" > "$expiry_rules" || return 1
+    cmp -s "$rules" "$expiry_rules" && return 0
+    chmod 0600 "$expiry_rules" && sync -f "$expiry_rules" || return 1
+    write_test_config "$expiry_rules" "$expiry_test" || return 1
+    "$nginx_bin" -t -c "$expiry_test" >/dev/null 2>&1 || return 1
+    cp -- "$rules" "$rules.bak.tmp" && chmod 0640 "$rules.bak.tmp" \
+        && sync -f "$rules.bak.tmp" && mv -f -- "$rules.bak.tmp" "$rules.bak" || return 1
+    if ! cp -- "$expiry_rules" "$rules.new" || ! chmod 0640 "$rules.new" \
+        || ! sync -f "$rules.new" || ! mv -f -- "$rules.new" "$rules" \
+        || ! "$nginx_bin" -s reload >/dev/null 2>&1; then
+        restore_previous_rules || return 1
+        return 1
+    fi
+}
+
+rotate_one_log() {
+    local path=$1 maximum=$2 index
+    [[ -f $path && ! -L $path ]] || return 0
+    (( $(stat -c %s "$path") >= maximum )) || return 0
+    [[ ! -L $path.1 && ! -L $path.2 && ! -L $path.3 && ! -L $path.4 ]] || return 1
+    for index in 4 3 2; do
+        if [[ -f $path.$((index - 1)) ]]; then
+            mv -f -- "$path.$((index - 1))" "$path.$index" || return 1
+        fi
+    done
+    mv -f -- "$path" "$path.1" || return 1
+    if ! install -m 0640 -o root -g "${APP_GID:-82}" /dev/null "$path"; then
+        mv -f -- "$path.1" "$path" || return 1
+        return 1
+    fi
+    if ! "$nginx_bin" -s reopen >/dev/null 2>&1; then
+        rm -f -- "$path"
+        mv -f -- "$path.1" "$path" || return 1
+        return 1
+    fi
+}
+
 mkdir -p "$staging"
 chmod 0700 "$staging"
+expiry_interval=${TEMP_EXPIRY_INTERVAL_SECONDS:-30}
+[[ $expiry_interval =~ ^[1-9][0-9]?$ ]] || exit 1
+last_expiry_check=0
+last_rotation_check=0
 while true; do
-    process_request || exit 1
+    process_request || echo 'Rule publish retry pending' >&2
+    now=$(date +%s)
+    if (( now - last_expiry_check >= expiry_interval )); then
+        last_expiry_check=$now
+        expire_temp_blocks "$now" || echo 'Temporary block expiry retry pending' >&2
+    fi
+    if (( now - last_rotation_check >= 10 )); then
+        last_rotation_check=$now
+        rotate_one_log /var/log/nginx/token-events.log 52428800 \
+            || echo 'Token event log rotation retry pending' >&2
+        rotate_one_log /var/log/nginx/access.log 52428800 \
+            || echo 'Access log rotation retry pending' >&2
+    fi
     sleep 1
 done

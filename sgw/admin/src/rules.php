@@ -129,8 +129,8 @@ SQL);
         ':state' => $state,
         ':expires_at' => $expiresAt,
         ':note' => $note,
-        ':first_seen' => $now,
-        ':last_seen' => $now,
+        ':first_seen' => null,
+        ':last_seen' => null,
         ':created_at' => $now,
         ':updated_at' => $now,
     ]);

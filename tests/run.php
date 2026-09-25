@@ -141,8 +141,8 @@ test_case('empty database initialization creates exactly six tables', function (
     expect_same(['access_logs', 'admins', 'ip_rules', 'settings', 'tokens', 'ua_rules'], $tables);
 });
 
-test_case('user_version is one and initialization is idempotent', function () use ($pdo): void {
-    expect_same(1, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
+test_case('user_version is two and initialization is idempotent', function () use ($pdo): void {
+    expect_same(2, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
     setting_set($pdo, 'idempotence_probe', 'preserved');
     initialize_database($pdo);
     expect_same('preserved', setting_get($pdo, 'idempotence_probe'));
@@ -495,6 +495,7 @@ test_case('logout destroys authenticated Session data', function (): void {
 });
 
 require __DIR__ . '/phase2.php';
+require __DIR__ . '/phase3.php';
 
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";

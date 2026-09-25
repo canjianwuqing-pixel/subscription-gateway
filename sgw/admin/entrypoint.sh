@@ -21,13 +21,15 @@ php-fpm -F &
 fpm_pid=$!
 nginx -g 'daemon off;' &
 nginx_pid=$!
+su-exec www-data php /app/src/worker.php &
+worker_pid=$!
 
-trap 'kill "$fpm_pid" "$nginx_pid" 2>/dev/null || true; wait "$fpm_pid" "$nginx_pid" 2>/dev/null || true; exit 0' TERM INT
-if wait -n "$fpm_pid" "$nginx_pid"; then
+trap 'kill "$fpm_pid" "$nginx_pid" "$worker_pid" 2>/dev/null || true; wait "$fpm_pid" "$nginx_pid" "$worker_pid" 2>/dev/null || true; exit 0' TERM INT
+if wait -n "$fpm_pid" "$nginx_pid" "$worker_pid"; then
     exit_status=1
 else
     exit_status=$?
 fi
-kill "$fpm_pid" "$nginx_pid" 2>/dev/null || true
-wait "$fpm_pid" "$nginx_pid" 2>/dev/null || true
+kill "$fpm_pid" "$nginx_pid" "$worker_pid" 2>/dev/null || true
+wait "$fpm_pid" "$nginx_pid" "$worker_pid" 2>/dev/null || true
 exit "$exit_status"

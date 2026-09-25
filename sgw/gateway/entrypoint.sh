@@ -25,6 +25,8 @@ valid_proxy_cidr() {
 }
 
 [[ -n ${DNS_RESOLVER:-} ]] || { echo 'DNS_RESOLVER is required' >&2; exit 1; }
+[[ ${GATEWAY_DOMAIN:-} =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] \
+    || { echo 'Invalid GATEWAY_DOMAIN' >&2; exit 1; }
 [[ ${REAL_IP_HEADER:-X-Forwarded-For} =~ ^[A-Za-z][A-Za-z0-9-]{0,63}$ ]] || {
     echo 'Invalid REAL_IP_HEADER' >&2; exit 1;
 }
@@ -42,6 +44,14 @@ resolver_line=${resolver_line% }
 mkdir -p /control /etc/nginx/generated /tmp/subscription-gateway /var/log/nginx
 chmod 0750 /etc/nginx/generated /var/log/nginx
 chmod 0700 /tmp/subscription-gateway
+[[ ${APP_GID:-82} =~ ^[1-9][0-9]{0,5}$ ]] || { echo 'Invalid APP_GID' >&2; exit 1; }
+for log_file in /var/log/nginx/access.log /var/log/nginx/token-events.log; do
+    [[ ! -L $log_file ]] || { echo 'Unsafe log path' >&2; exit 1; }
+    touch "$log_file"
+    chgrp "${APP_GID:-82}" "$log_file"
+    chmod 0640 "$log_file"
+done
+chgrp "${APP_GID:-82}" /var/log/nginx
 
 real_ip_tmp=/etc/nginx/generated/real_ip.conf.tmp
 : > "$real_ip_tmp"
@@ -57,7 +67,8 @@ chmod 0640 "$real_ip_tmp"
 sync -f "$real_ip_tmp"
 mv -f "$real_ip_tmp" /etc/nginx/generated/real_ip.conf
 
-sed "s/__DNS_RESOLVER__/$resolver_line/" /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf.tmp
+sed -e "s/__DNS_RESOLVER__/$resolver_line/" -e "s/__GATEWAY_DOMAIN__/$GATEWAY_DOMAIN/" \
+    /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf.tmp
 chmod 0640 /etc/nginx/nginx.conf.tmp
 sync -f /etc/nginx/nginx.conf.tmp
 mv -f /etc/nginx/nginx.conf.tmp /etc/nginx/nginx.conf
@@ -74,8 +85,13 @@ map "" $gateway_ready { default 0; }
 map "" $gateway_upstream { default ""; }
 map "" $gateway_upstream_host { default ""; }
 map "" $token_valid { default 0; }
+map "" $token_query_duplicate { default 0; }
+map "" $token_query_unsafe { default 0; }
+map "" $token_event_loggable { default 0; }
+log_format token_events escape=json '{"time":$msec,"token":"","ip":"$remote_addr","ua":"$http_user_agent","status":$status,"path":"$uri","policy":"$log_decision"}';
 map "" $policy_block { default 0; }
 map "" $policy_reason { default FAIL_CLOSED; }
+map "" $log_decision { default FAIL_CLOSED; }
 map "" $rate_key { default ""; }
 limit_req_zone $rate_key zone=subscription_rate:10m rate=1r/m;
 limit_req zone=subscription_rate nodelay;
@@ -86,7 +102,18 @@ RULES
     mv -f "$rules.tmp" "$rules"
     echo 'No active rules; gateway started in fail-closed mode.' >&2
 fi
-nginx -t
+if ! nginx -t; then
+    if [[ -f $rules.bak && ! -L $rules.bak ]]; then
+        cp -- "$rules.bak" "$rules.restore"
+        chmod 0640 "$rules.restore"
+        sync -f "$rules.restore"
+        mv -f -- "$rules.restore" "$rules"
+        nginx -t || exit 1
+        echo 'Invalid active rules restored from the last known backup.' >&2
+    else
+        exit 1
+    fi
+fi
 
 nginx -g 'daemon off;' &
 nginx_pid=$!
