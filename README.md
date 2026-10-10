@@ -19,6 +19,18 @@
 
 Admin 地址为 `https://<GATEWAY_DOMAIN>:<ADMIN_PORT>/<ADMIN_SECRET_PATH>`。首次安装不询问上游，Gateway 保持 Fail-Closed；登录后在“设置”中填写上游 HTTPS/HTTP Origin，规则通过候选文件、`nginx -t` 和安全 reload 发布。入口域名只能通过安装命令更换。
 
+## 入口追踪分组
+
+Admin 的“入口追踪”页面可为不同 Token 稳定分配不同的订阅节点入口。数据库升级到 schema v3 时会自动建立 `root → 1/2/3`，并使用现有 Token HMAC 密钥做确定性分组；分组只保存 Token 哈希，不保存明文。任一活动叶组都可先创建三个草稿子组，完整填写同一组源域名到目标域名的映射、验证后再原子激活。激活只重新分配该父组内的 Token，其他分支不受影响，并可继续递归拆分。
+
+追踪模式默认 `off`，不会改变现有订阅行为：
+
+- `off`：Gateway 直接回源，和升级前一致。
+- `preflight`：内部转换器解析并验证响应，但始终向客户端返回原始响应；转换器不可达时 Gateway 自动直连原上游。
+- `enforced`：按 Token 所在叶组替换 Clash/Mihomo YAML 的 `proxies[*].server`，或 VLESS、VMess、Shadowsocks、Trojan、Hysteria2/Hy2、TUIC URI 的连接 authority/地址字段。SNI、UUID、密码、Reality 参数和其他字段保持原值；未知格式、解析错误、响应过大或映射缺失会失败关闭。
+
+转换器只在 Compose 内部的 Admin `8081` 端口监听，不发布到宿主机。它最多转换 8 MiB 响应，通过固定的已校验上游 Origin 回源，校验证书且不跟随重定向。启用 `enforced` 前，所有活动叶组必须具有完全相同且完整的源域名集合。
+
 ## 运维命令
 
 ```bash

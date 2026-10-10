@@ -30,6 +30,13 @@ $rules = $argv[3] === 'fail-closed' ? <<<'RULES'
 map "" $gateway_ready { default 0; }
 map "" $gateway_upstream { default ""; }
 map "" $gateway_upstream_host { default ""; }
+map "" $tracking_mode { default "off"; }
+map "" $gateway_subscription_upstream { default ""; }
+map "" $gateway_subscription_host { default ""; }
+map "" $gateway_subscription_ssl_name { default ""; }
+map "" $tracking_internal_mode { default ""; }
+map "" $tracking_internal_client_ip { default ""; }
+map "" $tracking_internal_token { default ""; }
 map "" $token_valid { default 0; }
 map "" $token_query_duplicate { default 0; }
 map "" $token_query_unsafe { default 0; }

@@ -113,6 +113,8 @@ healthy gateway || fail 'Gateway did not become healthy'
 healthy admin || fail 'Admin did not become healthy'
 compose exec -T gateway nginx -t
 compose exec -T admin nginx -t
+[[ -z $(compose port admin 8081 2>/dev/null || true) ]] \
+    || fail 'internal transformer port is published to the host'
 
 gateway_id=$(compose ps -q gateway)
 network=$(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$gateway_id")
@@ -192,6 +194,92 @@ for attempt in {1..30}; do
     sleep 1
 done
 [[ $ingested == 1 ]] || fail 'worker did not securely ingest the Token event'
+
+db tracking-configure "$token" preflight
+publish
+request "$path?token=$token&format=uri"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'preflight transformer request failed'
+grep -Fq '@origin.example.invalid:443' "$temporary/response" \
+    || fail 'preflight did not preserve the original subscription body'
+request "$path?token=$token&format=unknown"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'preflight unknown-format request failed'
+[[ $(<"$temporary/response") == 'not a supported subscription document' ]] \
+    || fail 'preflight failure did not preserve the original response'
+request "$path?token=$token&format=large"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'preflight oversized response failed'
+[[ $(stat -c %s "$temporary/response") == 8388609 ]] \
+    || fail 'preflight did not preserve an oversized original response'
+compose stop admin >/dev/null
+request "$path?token=$token&format=uri"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'preflight did not fall back when Transformer was unavailable'
+grep -Fq '@origin.example.invalid:443' "$temporary/response" \
+    || fail 'preflight unavailable fallback did not return the original subscription'
+compose start admin >/dev/null
+healthy admin || fail 'Admin did not recover after Transformer fallback test'
+
+db tracking-mode enforced
+publish
+tracking_target=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php \
+    tracking-target "$token" | tr -d '\r\n')
+[[ $tracking_target =~ ^group[123]\.example\.invalid$ ]] || fail 'invalid effective tracking target'
+request "$path?token=$token&format=uri"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'enforced URI transform failed'
+grep -Fq "@$tracking_target:443" "$temporary/response" || fail 'URI authority host was not transformed'
+grep -Fq 'sni=origin.example.invalid' "$temporary/response" || fail 'URI non-authority fields changed'
+request "$path?token=$token&format=uri&upstream=http%3A%2F%2Fredirect-target.example.invalid"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'fixed-origin request failed'
+grep -Fq "@$tracking_target:443" "$temporary/response" \
+    || fail 'a client query parameter affected the fixed upstream behavior'
+
+request "$path?token=$token&format=yaml"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'enforced YAML transform failed'
+grep -Eq "^[[:space:]]*server:[[:space:]]*$tracking_target[[:space:]]*$" "$temporary/response" \
+    || fail 'YAML server host was not transformed'
+grep -Fq 'sni: origin.example.invalid' "$temporary/response" || fail 'YAML SNI changed unexpectedly'
+
+request "$path?token=$token&format=base64"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'enforced Base64 transform failed'
+python3 - "$temporary/response" "$tracking_target" <<'PY'
+import base64
+import pathlib
+import sys
+
+payload = pathlib.Path(sys.argv[1]).read_bytes().strip()
+payload += b"=" * (-len(payload) % 4)
+decoded = base64.b64decode(payload, validate=True).decode()
+assert f"@{sys.argv[2]}:443" in decoded
+assert "sni=origin.example.invalid" in decoded
+PY
+
+request "$path?token=$token&format=unknown"
+[[ $request_exit == 0 && $request_code == 502 ]] || fail 'enforced unknown format did not fail closed'
+if grep -Fq 'not a supported subscription document' "$temporary/response"; then
+    fail 'enforced transform failure leaked the original body'
+fi
+request "$path?token=$token&format=large"
+[[ $request_exit == 0 && $request_code == 502 ]] || fail 'enforced oversized response did not fail closed'
+[[ $(stat -c %s "$temporary/response") -lt 8388609 ]] || fail 'enforced oversized response leaked the original body'
+request "$path?token=$token&format=unauthorized"
+[[ $request_exit == 0 && $request_code == 401 ]] || fail 'upstream non-2xx status was not preserved'
+[[ $(<"$temporary/response") == UPSTREAM_UNAUTHORIZED ]] || fail 'upstream non-2xx body was not preserved'
+request "$path?token=$token&format=redirect"
+[[ $request_exit == 0 && $request_code == 302 ]] || fail 'upstream redirect status was not preserved'
+[[ $(<"$temporary/response") == UPSTREAM_REDIRECT ]] || fail 'transformer followed an upstream redirect'
+compose stop admin >/dev/null
+request "$path?token=$token&format=uri"
+[[ $request_exit == 0 && $request_code == 503 ]] || fail 'enforced mode did not fail closed when Transformer was unavailable'
+if grep -Fq '@origin.example.invalid:443' "$temporary/response"; then
+    fail 'enforced unavailable Transformer fell back to the original subscription'
+fi
+compose start admin >/dev/null
+healthy admin || fail 'Admin did not recover after enforced failure test'
+
+db token "$token" BLOCKED
+publish
+expect 403 "$path?token=$token&format=uri"
+db token "$token" NORMAL
+db tracking-mode off
+publish
 
 client_ip=$(sudo jq -r 'select(.path == "/api/v1/ci/subscribe" and .status == 200) | .ip' \
     "$runtime/logs/access.log" | tail -n 1)

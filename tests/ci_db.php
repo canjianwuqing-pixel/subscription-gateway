@@ -61,6 +61,29 @@ switch ($command) {
         $enabled = ($argv[2] ?? '') === 'on';
         save_rate_settings($pdo, $enabled, $enabled ? 1 : 20, 0);
         break;
+    case 'tracking-configure':
+        $token = (string) ($argv[2] ?? '');
+        $mode = (string) ($argv[3] ?? '');
+        validate_token_format($token);
+        tracking_assignment_for_hash($pdo, token_hash_value($token));
+        foreach (tracking_active_leaves($pdo) as $leaf) {
+            tracking_save_group_mappings($pdo, (int) $leaf['id'], [[
+                'source_host' => 'origin.example.invalid',
+                'target_host' => 'group' . str_replace('.', '-', (string) $leaf['path']) . '.example.invalid',
+            ]]);
+        }
+        tracking_set_mode($pdo, $mode);
+        break;
+    case 'tracking-mode':
+        tracking_set_mode($pdo, (string) ($argv[2] ?? ''));
+        break;
+    case 'tracking-target':
+        $token = (string) ($argv[2] ?? '');
+        validate_token_format($token);
+        $groupId = tracking_assignment_for_hash($pdo, token_hash_value($token));
+        $mapping = tracking_effective_mapping($pdo, $groupId);
+        echo $mapping['origin.example.invalid'] . "\n";
+        exit(0);
     case 'assert-ingested':
         $token = (string) ($argv[2] ?? '');
         validate_token_format($token);

@@ -417,7 +417,12 @@ function handle_api(string $route, string $method): never
             send_json(['ok' => true, 'overview' => overview_data($pdo)]);
         }
         if ($route === '/api/analysis/tokens' && $method === 'GET') {
-            send_json(['ok' => true, 'rows' => token_analysis_rows($pdo, (int) ($_GET['limit'] ?? 50))]);
+            $groupId = isset($_GET['group_id']) && $_GET['group_id'] !== '' ? (int) $_GET['group_id'] : null;
+            send_json(['ok' => true, 'rows' => token_analysis_rows(
+                $pdo,
+                (int) ($_GET['limit'] ?? 50),
+                $groupId
+            )]);
         }
         if ($route === '/api/logs' && $method === 'GET') {
             send_json(['ok' => true, 'result' => access_log_page($pdo, $_GET)]);
@@ -452,7 +457,8 @@ function handle_api(string $route, string $method): never
         }
 
         if ($route === '/api/tokens' && $method === 'GET') {
-            send_json(['ok' => true, 'tokens' => token_analysis_rows($pdo)]);
+            $groupId = isset($_GET['group_id']) && $_GET['group_id'] !== '' ? (int) $_GET['group_id'] : null;
+            send_json(['ok' => true, 'tokens' => token_analysis_rows($pdo, 50, $groupId)]);
         }
         if ($route === '/api/tokens' && $method === 'POST') {
             require_csrf();
@@ -576,6 +582,7 @@ function handle_api(string $route, string $method): never
                 'subscribe_path_template' => $body['subscribe_path_template'] ?? null,
                 'token_query_key' => $body['token_query_key'] ?? null,
                 'token_format_profile' => $body['token_format_profile'] ?? null,
+                'tracking_mode' => setting_get($pdo, 'tracking_mode', 'off'),
                 'rate_enabled' => setting_get($pdo, 'rate_enabled'),
                 'rate_per_minute' => setting_get($pdo, 'rate_per_minute'),
                 'rate_burst' => setting_get($pdo, 'rate_burst'),
@@ -587,6 +594,41 @@ function handle_api(string $route, string $method): never
                 bump_config_version($pdo);
             });
             send_saved_publish_result(['ok' => true], publish_current_rules($pdo));
+        }
+        if ($route === '/api/tracking' && $method === 'GET') {
+            send_json(['ok' => true, 'tracking' => [
+                'mode' => tracking_mode($pdo),
+                'groups' => tracking_list_groups($pdo),
+                'stats_24h' => tracking_transform_stats($pdo),
+            ]]);
+        }
+        if ($route === '/api/tracking/mode' && $method === 'PATCH') {
+            require_csrf();
+            $body = json_request_body();
+            tracking_set_mode($pdo, (string) ($body['mode'] ?? ''));
+            send_saved_publish_result(['ok' => true, 'mode' => tracking_mode($pdo)], publish_current_rules($pdo));
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)/mappings$#D', $route, $match) && $method === 'PUT') {
+            require_csrf();
+            $body = json_request_body();
+            $mappings = $body['mappings'] ?? null;
+            if (!is_array($mappings) || !array_is_list($mappings)) {
+                throw new InvalidArgumentException('mappings must be a JSON array');
+            }
+            tracking_save_group_mappings($pdo, (int) $match[1], $mappings);
+            send_json(['ok' => true, 'mappings' => tracking_group_mappings($pdo, (int) $match[1])]);
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)/split$#D', $route, $match) && $method === 'POST') {
+            require_csrf();
+            send_json(['ok' => true, 'children' => tracking_create_split($pdo, (int) $match[1])]);
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)/validate-split$#D', $route, $match) && $method === 'POST') {
+            require_csrf();
+            send_json(['ok' => true, 'children' => tracking_validate_split($pdo, (int) $match[1])]);
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)/activate-split$#D', $route, $match) && $method === 'POST') {
+            require_csrf();
+            send_json(['ok' => true, 'moved' => tracking_activate_split($pdo, (int) $match[1])]);
         }
         if ($route === '/api/gateway/status' && $method === 'GET') {
             send_json(['ok' => true, 'publish' => gateway_publish_status($pdo)]);

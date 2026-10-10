@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-const DATABASE_SCHEMA_VERSION = 2;
+const DATABASE_SCHEMA_VERSION = 3;
+const TRACKING_ALGORITHM_VERSION = 1;
 
 function env_required(string $name): string
 {
@@ -87,6 +88,34 @@ function require_64bit_php(): void
     if (PHP_INT_SIZE < 8) {
         throw new RuntimeException('Only 64-bit PHP is supported.');
     }
+}
+
+function tracking_group_key(): string
+{
+    return hash_hmac(
+        'sha256',
+        'subscription-gateway/tracking-group-key/v1',
+        (string) app_config()['token_hmac_key'],
+        true
+    );
+}
+
+function tracking_child_number(string $tokenHash, int $parentGroupId): int
+{
+    if (!preg_match('/^[0-9a-f]{64}$/D', $tokenHash) || $parentGroupId < 1) {
+        throw new InvalidArgumentException('Invalid tracking assignment input');
+    }
+    $digest = hash_hmac(
+        'sha256',
+        'parent:' . $parentGroupId . "\0" . $tokenHash,
+        tracking_group_key(),
+        true
+    );
+    $number = unpack('Nvalue', substr($digest, 0, 4));
+    if (!is_array($number)) {
+        throw new RuntimeException('Unable to calculate tracking assignment');
+    }
+    return ((int) $number['value'] % 3) + 1;
 }
 
 function open_database(string $path): PDO
@@ -246,6 +275,98 @@ SQL);
             $statement = $pdo->prepare('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (:key, :value, :time)');
             $statement->execute([':key' => 'log_retention_days', ':value' => '30', ':time' => time()]);
             $pdo->exec('PRAGMA user_version=2');
+            $version = 2;
+        }
+        if ($version === 2) {
+            $pdo->exec(<<<'SQL'
+CREATE TABLE tracking_groups (
+    id INTEGER PRIMARY KEY,
+    parent_id INTEGER,
+    child_no INTEGER NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('DRAFT', 'ACTIVE', 'ARCHIVED')),
+    split_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (parent_id) REFERENCES tracking_groups(id) ON DELETE RESTRICT,
+    UNIQUE (parent_id, child_no),
+    CHECK (
+        (parent_id IS NULL AND child_no = 0 AND path = 'root')
+        OR
+        (parent_id IS NOT NULL AND child_no BETWEEN 1 AND 3)
+    )
+);
+
+CREATE TABLE tracking_assignments (
+    token_hash TEXT PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    algorithm_version INTEGER NOT NULL CHECK (algorithm_version >= 1),
+    assigned_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (group_id) REFERENCES tracking_groups(id) ON DELETE RESTRICT,
+    CHECK (length(token_hash) = 64)
+);
+
+CREATE TABLE tracking_entry_mappings (
+    id INTEGER PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    source_host TEXT NOT NULL COLLATE NOCASE,
+    target_host TEXT COLLATE NOCASE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (group_id) REFERENCES tracking_groups(id) ON DELETE CASCADE,
+    UNIQUE (group_id, source_host)
+);
+
+CREATE TABLE tracking_transform_events (
+    id INTEGER PRIMARY KEY,
+    group_id INTEGER,
+    mode TEXT NOT NULL CHECK (mode IN ('preflight', 'enforced')),
+    format TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (group_id) REFERENCES tracking_groups(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_tracking_assignments_group ON tracking_assignments(group_id);
+CREATE INDEX idx_tracking_mappings_group ON tracking_entry_mappings(group_id);
+CREATE INDEX idx_tracking_events_created ON tracking_transform_events(created_at);
+CREATE INDEX idx_tracking_events_group_created ON tracking_transform_events(group_id, created_at);
+SQL);
+            $now = time();
+            $group = $pdo->prepare(
+                'INSERT INTO tracking_groups (id, parent_id, child_no, path, status, created_at, updated_at) '
+                . 'VALUES (:id, :parent_id, :child_no, :path, :status, :created_at, :updated_at)'
+            );
+            $group->execute([':id' => 1, ':parent_id' => null, ':child_no' => 0, ':path' => 'root',
+                ':status' => 'ACTIVE', ':created_at' => $now, ':updated_at' => $now]);
+            foreach ([1 => 2, 2 => 3, 3 => 4] as $childNo => $id) {
+                $group->execute([':id' => $id, ':parent_id' => 1, ':child_no' => $childNo,
+                    ':path' => (string) $childNo, ':status' => 'ACTIVE',
+                    ':created_at' => $now, ':updated_at' => $now]);
+            }
+            $setting = $pdo->prepare(
+                'INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (:key, :value, :updated_at)'
+            );
+            foreach (['tracking_mode' => 'off', 'tracking_algorithm_version' => '1'] as $key => $value) {
+                $setting->execute([':key' => $key, ':value' => $value, ':updated_at' => $now]);
+            }
+            $assignment = $pdo->prepare(<<<'SQL'
+INSERT INTO tracking_assignments
+    (token_hash, group_id, algorithm_version, assigned_at, updated_at)
+VALUES (:token_hash, :group_id, :algorithm_version, :assigned_at, :updated_at)
+SQL);
+            foreach ($pdo->query('SELECT token_hash FROM tokens ORDER BY id') as $token) {
+                $childNo = tracking_child_number((string) $token['token_hash'], 1);
+                $assignment->execute([
+                    ':token_hash' => (string) $token['token_hash'],
+                    ':group_id' => $childNo + 1,
+                    ':algorithm_version' => TRACKING_ALGORITHM_VERSION,
+                    ':assigned_at' => $now,
+                    ':updated_at' => $now,
+                ]);
+            }
+            $pdo->exec('PRAGMA user_version=3');
         }
         $pdo->commit();
     } catch (Throwable $error) {

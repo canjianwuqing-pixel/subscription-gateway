@@ -32,6 +32,8 @@ services:
     env_file: ${DEPLOY_ENV_FILE:-.env}
     ports:
       - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_PORT:-64444}:8443"
+    expose:
+      - "8081"
     volumes:
       - ./runtime/control:/control
       - ./runtime/data:/data

@@ -127,7 +127,7 @@ test_case('missing and malformed Tokens are 400 before proxy', function () use (
     expect_same(0, preg_match('/^[0-9a-f]{32}$/', ''));
     expect_same(0, preg_match('/^[0-9a-f]{32}$/', 'NOT_A_VALID_TOKEN'));
     $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf');
-    expect_true(strpos($nginx, 'if ($token_valid = 0) { return 400; }') < strpos($nginx, 'proxy_pass $gateway_upstream$request_uri;'));
+    expect_true(strpos($nginx, 'if ($token_valid = 0) { return 400; }') < strpos($nginx, 'proxy_pass $gateway_subscription_upstream$request_uri;'));
 });
 
 test_case('policy prioritizes Token and IP blocks before allowlists', function () use ($phase2Pdo): void {

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/rules.php';
+require_once __DIR__ . '/tracking.php';
 
 const SUBSCRIBE_TEMPLATE_V1 = '/api/v1/{segment}/subscribe';
 
@@ -46,6 +46,10 @@ function validate_gateway_settings(array $settings): array
     if (($settings['token_format_profile'] ?? null) !== 'v2board_guid_v1') {
         throw new InvalidArgumentException('Unsupported token_format_profile');
     }
+    $trackingMode = (string) ($settings['tracking_mode'] ?? 'off');
+    if (!in_array($trackingMode, TRACKING_MODES, true)) {
+        throw new InvalidArgumentException('Invalid tracking_mode');
+    }
     $enabled = $settings['rate_enabled'] ?? null;
     if (!in_array($enabled, ['0', '1'], true)) {
         throw new InvalidArgumentException('Invalid rate_enabled');
@@ -64,6 +68,7 @@ function validate_gateway_settings(array $settings): array
         'subscribe_path_template' => SUBSCRIBE_TEMPLATE_V1,
         'token_query_key' => $tokenKey,
         'token_format_profile' => 'v2board_guid_v1',
+        'tracking_mode' => $trackingMode,
         'rate_enabled' => $rateEnabled,
         'rate_per_minute' => $rateValue,
         'rate_burst' => $burstValue,
@@ -92,6 +97,25 @@ function compile_gateway_rules(PDO $pdo): array
         'map "" $gateway_ready { default 1; }',
         'map "" $gateway_upstream { default ' . nginx_quoted($settings['upstream_url']) . '; }',
         'map "" $gateway_upstream_host { default ' . nginx_quoted($settings['upstream_host']) . '; }',
+        'map "" $tracking_mode { default ' . nginx_quoted($settings['tracking_mode']) . '; }',
+        'map $tracking_mode $gateway_subscription_upstream {',
+        '    default "http://admin:8081";',
+        '    off $gateway_upstream;',
+        '}',
+        'map $tracking_mode $gateway_subscription_host {',
+        '    default "subscription-transformer";',
+        '    off $gateway_upstream_host;',
+        '}',
+        'map $tracking_mode $gateway_subscription_ssl_name {',
+        '    default "subscription-transformer";',
+        '    off $gateway_upstream_host;',
+        '}',
+        'map $tracking_mode $tracking_internal_mode { default $tracking_mode; off ""; }',
+        'map $tracking_mode $tracking_internal_client_ip { default $remote_addr; off ""; }',
+        'map $tracking_mode $tracking_internal_token {',
+        '    default $arg_' . $settings['token_query_key'] . ';',
+        '    off "";',
+        '}',
         'map $arg_' . $settings['token_query_key'] . ' $token_valid {',
         '    default 0;',
         '    "~^[0-9a-f]{32}$" 1;',

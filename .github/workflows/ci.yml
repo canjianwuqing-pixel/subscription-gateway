@@ -19,13 +19,13 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: pdo_sqlite, sqlite3, sodium
+          extensions: pdo_sqlite, sqlite3, sodium, curl, yaml
           coverage: none
       - name: Check PHP extensions and syntax
         shell: bash
         run: |
           set -euo pipefail
-          php -r 'foreach (["pdo_sqlite", "sqlite3", "sodium"] as $extension) { if (!extension_loaded($extension)) { fwrite(STDERR, "Missing PHP extension: $extension\n"); exit(1); } }'
+          php -r 'foreach (["pdo_sqlite", "sqlite3", "sodium", "curl", "yaml"] as $extension) { if (!extension_loaded($extension)) { fwrite(STDERR, "Missing PHP extension: $extension\n"); exit(1); } }'
           while IFS= read -r -d '' file; do php -l "$file" >/dev/null; done < <(find sgw tests -type f -name '*.php' -print0)
       - name: Check shell syntax
         shell: bash

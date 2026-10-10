@@ -46,14 +46,23 @@ SQL);
     ];
 }
 
-function token_analysis_rows(PDO $pdo, int $limit = 50): array
+function token_analysis_rows(PDO $pdo, int $limit = 50, ?int $trackingGroupId = null): array
 {
     $limit = max(1, min(100, $limit));
+    if ($trackingGroupId !== null && $trackingGroupId < 1) {
+        throw new InvalidArgumentException('Invalid tracking group filter');
+    }
     $now = time();
-    $query = $pdo->prepare(<<<'SQL'
+    $groupFilter = $trackingGroupId === null ? '' : 'WHERE a.group_id = :tracking_group_id';
+    $query = $pdo->prepare(<<<SQL
 WITH recent AS (
-    SELECT id, token_encrypted, state, expires_at, first_seen, last_seen, request_count
-    FROM tokens ORDER BY COALESCE(last_seen, created_at) DESC LIMIT :limit
+    SELECT t.id, t.token_encrypted, t.state, t.expires_at, t.first_seen, t.last_seen, t.request_count,
+           a.group_id AS tracking_group_id, g.path AS tracking_group_path
+    FROM tokens t
+    LEFT JOIN tracking_assignments a ON a.token_hash = t.token_hash
+    LEFT JOIN tracking_groups g ON g.id = a.group_id
+    {$groupFilter}
+    ORDER BY COALESCE(t.last_seen, t.created_at) DESC LIMIT :limit
 )
 SELECT t.*,
     COUNT(CASE WHEN l.created_at >= :m1 THEN 1 END) AS requests_1m,
@@ -71,6 +80,9 @@ SQL);
     foreach ([':limit' => $limit, ':m1' => $now - 60, ':m5' => $now - 300,
         ':h1' => $now - 3600, ':h24' => $now - 86400] as $key => $value) {
         $query->bindValue($key, $value, PDO::PARAM_INT);
+    }
+    if ($trackingGroupId !== null) {
+        $query->bindValue(':tracking_group_id', $trackingGroupId, PDO::PARAM_INT);
     }
     $query->execute();
     $rows = $query->fetchAll();
@@ -96,7 +108,10 @@ SQL);
 
 function token_detail_data(PDO $pdo, int $id, string $window): ?array
 {
-    $query = $pdo->prepare('SELECT id, state, expires_at, first_seen, last_seen, request_count FROM tokens WHERE id = :id');
+    $query = $pdo->prepare('SELECT t.id, t.state, t.expires_at, t.first_seen, t.last_seen, t.request_count, '
+        . 'a.group_id AS tracking_group_id, g.path AS tracking_group_path FROM tokens t '
+        . 'LEFT JOIN tracking_assignments a ON a.token_hash = t.token_hash '
+        . 'LEFT JOIN tracking_groups g ON g.id = a.group_id WHERE t.id = :id');
     $query->execute([':id' => $id]);
     $token = $query->fetch();
     if (!is_array($token)) return null;

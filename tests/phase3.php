@@ -8,15 +8,16 @@ $phase3Pdo = open_database($phase3Directory . '/worker.db');
 initialize_database($phase3Pdo);
 setting_set($phase3Pdo, 'upstream_url', 'https://backend.example.test');
 
-test_case('v1 SQLite settings/admin schema migrates without deleting data', function () use ($phase3Directory): void {
+test_case('v1 SQLite settings/admin schema migrates through tracking schema without deleting data', function () use ($phase3Directory): void {
     $old = open_database($phase3Directory . '/old.db');
     $old->exec('CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, '
         . 'created_at INTEGER, updated_at INTEGER)');
     $old->exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+    $old->exec('CREATE TABLE tokens (id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE)');
     $old->exec("INSERT INTO settings VALUES ('config_version', '7', 1)");
     $old->exec('PRAGMA user_version=1');
     initialize_database($old);
-    expect_same(2, (int) $old->query('PRAGMA user_version')->fetchColumn());
+    expect_same(3, (int) $old->query('PRAGMA user_version')->fetchColumn());
     expect_same('7', setting_get($old, 'config_version'));
     expect_same('30', setting_get($old, 'log_retention_days'));
     $columns = $old->query('PRAGMA table_info(admins)')->fetchAll();

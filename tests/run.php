@@ -21,7 +21,7 @@ putenv('TOKEN_ENCRYPTION_KEY=' . base64_encode(str_repeat('E', 32)));
 
 ini_set('session.save_path', $sessionDirectory);
 
-foreach (['PDO', 'pdo_sqlite', 'sqlite3', 'sodium'] as $extension) {
+foreach (['PDO', 'pdo_sqlite', 'sqlite3', 'sodium', 'curl', 'yaml'] as $extension) {
     if (!extension_loaded($extension)) {
         throw new RuntimeException("Test PHP is missing required extension: {$extension}");
     }
@@ -74,7 +74,8 @@ function expect_exception(callable $callback, string $class): void
 
 function table_count(PDO $pdo, string $table): int
 {
-    if (!in_array($table, ['admins', 'tokens', 'ip_rules', 'ua_rules', 'settings', 'access_logs'], true)) {
+    if (!in_array($table, ['admins', 'tokens', 'ip_rules', 'ua_rules', 'settings', 'access_logs',
+        'tracking_groups', 'tracking_assignments', 'tracking_entry_mappings', 'tracking_transform_events'], true)) {
         throw new InvalidArgumentException('Unexpected test table');
     }
     return (int) $pdo->query("SELECT COUNT(*) FROM {$table}")->fetchColumn();
@@ -148,18 +149,19 @@ function finish_test_worker(array $worker): string
 $databasePath = $dataDirectory . DIRECTORY_SEPARATOR . 'main.db';
 $pdo = open_database($databasePath);
 
-test_case('empty database initialization creates exactly six tables', function () use ($pdo): void {
+test_case('empty database initialization creates core and tracking tables', function () use ($pdo): void {
     initialize_database($pdo);
     $statement = $pdo->prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     );
     $statement->execute();
     $tables = array_column($statement->fetchAll(), 'name');
-    expect_same(['access_logs', 'admins', 'ip_rules', 'settings', 'tokens', 'ua_rules'], $tables);
+    expect_same(['access_logs', 'admins', 'ip_rules', 'settings', 'tokens', 'tracking_assignments',
+        'tracking_entry_mappings', 'tracking_groups', 'tracking_transform_events', 'ua_rules'], $tables);
 });
 
-test_case('user_version is two and initialization is idempotent', function () use ($pdo): void {
-    expect_same(2, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
+test_case('user_version is three and initialization is idempotent', function () use ($pdo): void {
+    expect_same(3, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
     setting_set($pdo, 'idempotence_probe', 'preserved');
     initialize_database($pdo);
     expect_same('preserved', setting_get($pdo, 'idempotence_probe'));
@@ -513,6 +515,7 @@ test_case('logout destroys authenticated Session data', function (): void {
 
 require __DIR__ . '/phase2.php';
 require __DIR__ . '/phase3.php';
+require __DIR__ . '/phase4.php';
 
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";
