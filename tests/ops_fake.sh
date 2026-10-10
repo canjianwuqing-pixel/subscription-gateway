@@ -58,6 +58,9 @@ cat > "$test_root/fake/docker" <<'FAKE'
 FAKE
 chmod 0755 "$test_root/fake/docker"
 PATH="$test_root/fake:$PATH" ensure_docker
+# Never start a real host daemon during this simulated failure.
+systemd_running() { return 1; }
+service() { return 1; }
 if printf 'n\n' | (export PATH="$test_root/fake:$PATH" DOCKER_FAKE_FAIL=1; ensure_docker) >/dev/null 2>&1; then
     echo 'Expected Docker-install refusal to fail' >&2
     exit 1

@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/publish.php';
+require_once __DIR__ . '/installation.php';
 
 if (PHP_SAPI !== 'cli') {
     http_response_code(404);
@@ -9,9 +10,32 @@ if (PHP_SAPI !== 'cli') {
 
 try {
     $command = $argv[1] ?? '';
-    $pdo = app_db();
+    if ($command === 'installation-probe') {
+        installation_extensions_check();
+        echo 'INSTALLER_API_1', PHP_EOL;
+        exit;
+    }
+    if ($command === 'transformer-check') {
+        installation_transformer_check();
+        echo 'TRANSFORMER_OK', PHP_EOL;
+        exit;
+    }
+    $readOnly = in_array($command, ['installation-check', 'admin-status', 'integrity', 'versions', 'upstream-state'], true);
+    if ($readOnly && !is_file((string) app_config()['database_path'])) {
+        throw new RuntimeException('Database missing; run the installer to migrate it');
+    }
+    $pdo = $readOnly ? open_database((string) app_config()['database_path']) : app_db();
     if ($command === 'migrate') {
         echo 'MIGRATED', PHP_EOL;
+    } elseif ($command === 'installation-check') {
+        installation_extensions_check();
+        $status = installation_database_check($pdo);
+        echo 'INSTALLATION_OK schema=', $status['schema'], ' tracking_mode=', $status['tracking_mode'],
+            ' upstream=', $status['upstream'], PHP_EOL;
+    } elseif ($command === 'admin-status') {
+        $count = admin_count($pdo);
+        $username = $count === 1 ? (string) $pdo->query('SELECT username FROM admins LIMIT 1')->fetchColumn() : '';
+        echo $count, ' ', $username, PHP_EOL;
     } elseif ($command === 'init-admin') {
         if (admin_count($pdo) !== 0) throw new RuntimeException('Administrator already exists');
         $username = (string) ($argv[2] ?? '');

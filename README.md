@@ -4,7 +4,7 @@
 
 ## 状态与安装
 
-代码已包含正式安装、证书、Admin、规则发布和分析实现；当前 Windows 开发机没有 Docker，**Linux 全新 VPS 安装和真实 ACME 尚未验证**。首次使用应先在隔离的 Debian/Ubuntu 测试 VPS 验证，不要直接切换生产流量。
+代码包含正式安装、失败续装、证书、Admin、规则发布和分析实现。CI 验证模拟首次安装/续装和真实 Linux Docker/Nginx；**真实公网 VPS 的 HTTP-01/DNS-01 签发、续期仍需在目标环境验证**。首次使用先在隔离的 Debian/Ubuntu 测试 VPS 验证，不要直接切换生产流量。
 
 将项目上传到 Linux 后，以 root 在项目根目录执行：
 
@@ -16,6 +16,12 @@
 ```
 
 首次安装会检查 Debian/Ubuntu、64 位、磁盘、Docker/Compose，并仅在确认后安装缺失的 Docker。交互输入入口域名、Admin 端口、管理员用户名和证书方式（HTTP-01、Cloudflare DNS-01、已有证书）。Admin 路径、两把 Token 密钥和初始密码独立随机生成；密码仅在安装成功时显示一次，不写入 `.env`。部署配置在 `sgw/.env`（0600），运行文件在 `sgw/runtime/`，两者均不纳入 Git。
+
+正式流量是**公网 443 → Gateway 容器 8443（TLS）**。Admin 默认公网 HTTPS 端口为 **64444**。`8080` 仅用于容器内 healthz，不能使用旧的 `proxy_pass http://127.0.0.1:8080` 转发订阅；`8081` 是 Compose 内部 Transformer，`8443` 是容器内 TLS 监听端口。这三个容器端口不要额外发布/开放到公网。安装会提前检查宿主机 Gateway/Admin 端口冲突，续装时识别本项目已有容器，不要求宿主机 8080/8081/8443 空闲。
+
+HTTP-01 仍使用 Let's Encrypt/acme.sh standalone，**签发及续期时需要端口 80 空闲、公网可达，域名 A 记录匹配本机**。DNS-01 不要求端口 80，Cloudflare API Token 必填、Zone ID 可选。两种自动模式都会询问安装缺失的 cron，并验证服务启动/开机启用、续期任务和部署 hook。已有证书模式不需要 cron、acme.sh、端口 80 或续期 hook。
+
+安装失败时，先修复报告的错误，再执行 `./setup.sh` 即可安全续装。`.env` 存在不等于安装完成：安装器检查实际证书、镜像、迁移、管理员、容器健康和续期状态，只补齐缺失阶段，保留现有密钥、秘密路径、数据库/追踪和有效 active 证书。只有完整检查成功才原子写入 root 拥有、0600 的 `runtime/install-complete`，标记不包含密码或密钥。若管理员已经创建但安装未完成、密码尚未交付，最终成功时会重置并仅显示一次 `Recovery administrator password (shown once)`；不会保存明文密码。该“显示”指向当前运行的标准输出，请在交互终端执行，不要将输出重定向到共享日志。
 
 Admin 地址为 `https://<GATEWAY_DOMAIN>:<ADMIN_PORT>/<ADMIN_SECRET_PATH>`。首次安装不询问上游，Gateway 保持 Fail-Closed；登录后在“设置”中填写上游 HTTPS/HTTP Origin，规则通过候选文件、`nginx -t` 和安全 reload 发布。入口域名只能通过安装命令更换。
 
@@ -46,7 +52,9 @@ Admin 的“入口追踪”页面可为不同 Token 稳定分配不同的订阅�
 ./update.sh --pull
 ```
 
-重复执行 `./setup.sh` 不重置现有密码、密钥、证书、规则或数据库。`--uninstall` 只停删项目容器并保留数据；`--purge` 需输入当前域名及 `PURGE`，永久删除本项目运行数据和 `.env`。`update.sh` 使用 SQLite `VACUUM INTO` 备份、保留旧镜像标识并在失败时尝试回滚；`--pull` 要求 Git 工作区干净且存在远端。
+完整安装后重复执行 `./setup.sh` 会同时验证完成标记和实际运行状态，不重置现有密码、密钥、证书、规则或数据库；状态损坏时报告并尝试安全恢复。`--uninstall` 只停删项目容器并保留数据，之后再执行 `./setup.sh` 可启动保留的数据，密码保持不变。`--purge` 需输入当前域名及 `PURGE`，永久删除本项目运行数据（含安装标记）和 `.env`，不删除全局 Docker/acme.sh。`update.sh` 使用 SQLite `VACUUM INTO` 备份、保留旧镜像标识并在失败时尝试回滚；`--pull` 要求 Git 工作区干净且存在远端。
+
+`--check` 不会自动迁移数据库：检查当前 schema v3、合法 tracking_mode、root/1/2/3 初始组、管理员、SQLite 完整性、curl/yaml、实际 8081 → Transformer FPM 9001、8081 无宿主机绑定、restart policy、自动续期/cron、证书、两端 nginx 和规则版本同步。未配置上游是合法的初始 Fail-Closed 状态，检查仍可通过；新数据库 tracking_mode 为 `off`。
 
 自动证书通过 acme.sh 的 root-only 数据保存续期凭据，续期结果先写 staging，再验证并切换 active；手工证书不自动续期。Cloudflare DNS API Token 不进入本项目 `.env`、SQLite、页面或日志。
 
@@ -63,6 +71,7 @@ Admin 的“入口追踪”页面可为不同 Token 稳定分配不同的订阅�
 php tests/run.php
 bash tests/watch_fake.sh
 bash tests/ops_fake.sh
+sudo bash tests/install_fake.sh  # Linux 下检查真实 root 权限；无真实 ACME/apt/get.docker.com
 ```
 
 fake watcher 和 fake 运维测试不等同于 Docker/Linux 真实集成、HTTP-01/DNS-01 签发或真实续期。上线前必须在隔离 VPS 完成这些验证，并确认重复 Token Query、TLS、规则回滚、worker 轮转和健康检查在目标发行版上的行为。

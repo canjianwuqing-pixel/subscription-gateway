@@ -113,6 +113,12 @@ healthy gateway || fail 'Gateway did not become healthy'
 healthy admin || fail 'Admin did not become healthy'
 compose exec -T gateway nginx -t
 compose exec -T admin nginx -t
+compose exec -T admin su-exec www-data php /app/src/cli.php installation-check
+compose exec -T admin su-exec www-data php /app/src/cli.php transformer-check
+for service in admin gateway; do
+    [[ $(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$(compose ps -q "$service")") == unless-stopped ]] \
+        || fail 'container restart policy is not unless-stopped'
+done
 admin_id=$(compose ps -q admin)
 docker inspect "$admin_id" | jq -e '.[0].HostConfig.PortBindings["8081/tcp"] == null' >/dev/null \
     || fail 'internal transformer port is published to the host'

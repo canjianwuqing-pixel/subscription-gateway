@@ -51,18 +51,87 @@ check_platform() {
     done
 }
 ensure_docker() {
-    if command -v docker >/dev/null && docker version >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-        return 0
-    fi
     local response script
-    read -r -p 'Docker/Compose not available. Install official Docker now? [y/N] ' response
-    [[ $response == y || $response == Y ]] || die 'Docker is required'
-    script=$(mktemp)
-    curl --proto '=https' --tlsv1.2 -fsSL https://get.docker.com -o "$script" || die 'Docker installer download failed'
-    sh "$script" || die 'Docker installation failed'
-    rm -f -- "$script"
-    docker version >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 \
-        || die 'Docker or Compose validation failed'
+    if ! command -v docker >/dev/null; then
+        read -r -p 'Docker not installed. Install official Docker now? [y/N] ' response
+        [[ $response == y || $response == Y ]] || die 'Docker is required'
+        script=$(mktemp)
+        if ! curl --proto '=https' --tlsv1.2 -fsSL https://get.docker.com -o "$script"; then
+            rm -f -- "$script"
+            die 'Docker installer download failed'
+        fi
+        if ! sh "$script"; then
+            rm -f -- "$script"
+            die 'Docker installation failed'
+        fi
+        rm -f -- "$script"
+    fi
+    if ! docker version >/dev/null 2>&1; then
+        if systemd_running; then
+            systemctl start docker || die 'Cannot start Docker daemon'
+        elif command -v service >/dev/null; then
+            service docker start || die 'Cannot start Docker daemon'
+        else
+            die 'Docker daemon unavailable; start it and run ./setup.sh again'
+        fi
+        docker version >/dev/null 2>&1 || die 'Docker daemon still unavailable'
+    fi
+    if ! docker compose version >/dev/null 2>&1; then
+        install_packages_if_approved docker-compose-plugin
+        docker compose version >/dev/null 2>&1 \
+            || die 'Compose plugin unavailable; install docker-compose-plugin from the official Docker apt repository'
+    fi
+}
+systemd_running() { [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; }
+cron_service_active() {
+    if systemd_running; then
+        systemctl is-active --quiet cron && systemctl is-enabled --quiet cron
+    else
+        command -v service >/dev/null && service cron status >/dev/null 2>&1 \
+            || { command -v pgrep >/dev/null && pgrep -x cron >/dev/null; }
+    fi
+}
+ensure_cron() {
+    if ! command -v crontab >/dev/null || ! command -v cron >/dev/null; then
+        install_packages_if_approved cron
+    fi
+    command -v crontab >/dev/null || die 'crontab unavailable; automatic renewal cannot be guaranteed'
+    if ! cron_service_active; then
+        if systemd_running; then
+            systemctl enable --now cron || die 'Cannot enable/start cron for automatic renewal'
+        elif command -v service >/dev/null; then
+            service cron start || die 'Cannot start cron for automatic renewal'
+            if command -v update-rc.d >/dev/null; then update-rc.d cron defaults >/dev/null; fi
+        else
+            die 'Cannot manage cron on this system; start cron before automatic certificate setup'
+        fi
+    fi
+    cron_service_active || die 'cron is not running/enabled; automatic renewal cannot be guaranteed'
+}
+ensure_port_tools() {
+    command -v ss >/dev/null || install_packages_if_approved iproute2
+    command -v ss >/dev/null || die 'ss is required to check host port conflicts'
+}
+project_owns_port() {
+    local port=$1 service=$2 id
+    [[ -f $ENV_FILE ]] || return 1
+    id=$(compose ps -q "$service" 2>/dev/null) || return 1
+    [[ -n $id && $(docker inspect --format '{{.State.Running}}' "$id" 2>/dev/null) == true ]] || return 1
+    docker inspect --format '{{range (index .NetworkSettings.Ports "8443/tcp")}}{{println .HostPort}}{{end}}' "$id" \
+        2>/dev/null | grep -Fxq "$port"
+}
+assert_install_ports() {
+    local gateway_port=$1 admin_port=$2 port service listeners
+    [[ $gateway_port != "$admin_port" ]] || die 'Gateway and Admin host ports must differ'
+    for service in gateway admin; do
+        port=$gateway_port
+        [[ $service != admin ]] || port=$admin_port
+        listeners=$(ss -H -ltnp "( sport = :$port )") || die 'Cannot inspect host listening ports'
+        if [[ -n $listeners ]] && ! project_owns_port "$port" "$service"; then
+            printf '%s\n' "$listeners" >&2
+            die "Host port $port ($service) is occupied by another listener; installation stopped"
+        fi
+    done
 }
 make_runtime() {
     local path
@@ -90,23 +159,50 @@ certificate_verify() {
     key_public=$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | sha256sum) || return 1
     [[ ${cert_public%% *} == "${key_public%% *}" ]]
 }
-acme_binary() {
-    local binary=/root/.acme.sh/acme.sh temporary
+acme_home() { printf '/root/.acme.sh\n'; }
+acme_binary() (
+    local acme_dir binary temporary=''
+    acme_dir=$(acme_home)
+    binary=$acme_dir/acme.sh
+    ensure_cron >&2
     if [[ -x $binary ]]; then
-        chmod -R go-rwx /root/.acme.sh
+        chmod -R go-rwx "$acme_dir"
         printf '%s\n' "$binary"
         return
     fi
-    command -v git >/dev/null || install_packages_if_approved git
+    command -v git >/dev/null || install_packages_if_approved git >&2
     temporary=$(mktemp -d)
-    git clone --depth 1 https://github.com/acmesh-official/acme.sh.git "$temporary/acme.sh" >/dev/null 2>&1 \
+    trap '[[ -z $temporary ]] || rm -rf -- "$temporary"' EXIT
+    git clone --depth 1 https://github.com/acmesh-official/acme.sh.git "$temporary/acme.sh" >&2 \
         || die 'Official acme.sh clone failed'
-    "$temporary/acme.sh/acme.sh" --install --home /root/.acme.sh >/dev/null 2>&1 \
-        || die 'acme.sh installation failed'
-    rm -rf -- "$temporary"
+    (cd "$temporary/acme.sh" && ./acme.sh --install --home "$acme_dir") >&2 \
+        || die 'acme.sh installation failed from its source directory; see the error above'
     [[ -x $binary ]] || die 'acme.sh executable missing after installation'
-    chmod -R go-rwx /root/.acme.sh
+    chmod -R go-rwx "$acme_dir"
     printf '%s\n' "$binary"
+)
+acme_cron_registered() {
+    crontab -l 2>/dev/null | awk -v directory="$(acme_home)" '
+        /^[[:space:]]*#/ {next}
+        index($0,"--cron") && index($0,directory) && index($0,"acme.sh") {found=1}
+        END {exit !found}
+    '
+}
+acme_renewal_ready() {
+    local domain=$1 binary hook metadata expected
+    binary=$(acme_home)/acme.sh
+    hook=$RUNTIME/ssl/deploy-hook.sh
+    [[ -x $binary && -f $hook && ! -L $hook && -x $hook ]] || return 1
+    [[ $(stat -c %u "$hook") == 0 && $(stat -c %a "$hook") == 700 ]] || return 1
+    expected=$(printf '#!/usr/bin/env bash\nexec %q --deploy-staged-certificate\n' "$SGW_DIR/../setup.sh")
+    [[ $(<"$hook") == "$expected" ]] || return 1
+    cron_service_active && acme_cron_registered || return 1
+    # --info can include DNS credentials: capture it, select only deployment fields,
+    # and never print the complete metadata (or source an ACME configuration file).
+    metadata=$("$binary" --info -d "$domain" 2>/dev/null) || return 1
+    [[ $(awk -F= '$1=="Le_RealFullChainPath" {print substr($0,index($0,"=")+1)}' <<< "$metadata") == "$RUNTIME/ssl/staging/fullchain.pem" ]] \
+        && [[ $(awk -F= '$1=="Le_RealKeyPath" {print substr($0,index($0,"=")+1)}' <<< "$metadata") == "$RUNTIME/ssl/staging/privkey.pem" ]] \
+        && [[ $(awk -F= '$1=="Le_ReloadCmd" {print substr($0,index($0,"=")+1)}' <<< "$metadata") == "$hook" ]]
 }
 port_80_free() {
     command -v ss >/dev/null || return 1
@@ -144,7 +240,7 @@ acquire_certificate() {
             || die 'HTTP-01 issuance failed'
         "$acme" --install-cert -d "$domain" --fullchain-file "$fullchain" --key-file "$key" >/dev/null 2>&1 \
             || die 'Cannot install issued certificate into staging'
-        chmod -R go-rwx /root/.acme.sh
+        chmod -R go-rwx "$(acme_home)"
     elif [[ $mode == dns-cf ]]; then
         acme=$(acme_binary)
         read -r -s -p 'Cloudflare DNS API Token: ' token; printf '\n'
@@ -161,7 +257,7 @@ acquire_certificate() {
         unset CF_Token CF_Zone_ID token
         "$acme" --install-cert -d "$domain" --fullchain-file "$fullchain" --key-file "$key" >/dev/null 2>&1 \
             || die 'Cannot install issued certificate into staging'
-        chmod -R go-rwx /root/.acme.sh
+        chmod -R go-rwx "$(acme_home)"
     else
         die 'Unsupported certificate mode'
     fi
@@ -173,16 +269,20 @@ register_acme_hook() {
     local mode=$1 domain=$2 acme hook
     [[ $mode != existing ]] || return 0
     acme=$(acme_binary)
+    if ! acme_cron_registered; then
+        "$acme" --install-cronjob >/dev/null 2>&1 || return 1
+    fi
     hook=$(ensure_deploy_hook)
     "$acme" --install-cert -d "$domain" \
         --fullchain-file "$RUNTIME/ssl/staging/fullchain.pem" \
         --key-file "$RUNTIME/ssl/staging/privkey.pem" \
         --reloadcmd "$hook" >/dev/null 2>&1 || return 1
-    chmod -R go-rwx /root/.acme.sh
+    chmod -R go-rwx "$(acme_home)"
+    acme_renewal_ready "$domain"
 }
 ensure_deploy_hook() {
     local hook=$RUNTIME/ssl/deploy-hook.sh
-    [[ ! -L $hook ]] || die 'Unsafe deploy hook path'
+    [[ ! -L $hook && ! -L $hook.tmp ]] || die 'Unsafe deploy hook path'
     printf '#!/usr/bin/env bash\nexec %q --deploy-staged-certificate\n' "$SGW_DIR/../setup.sh" > "$hook.tmp"
     chown root:root "$hook.tmp"
     chmod 0700 "$hook.tmp"

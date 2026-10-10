@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-ROOT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=sgw/ops.sh
 . "$ROOT_DIR/sgw/ops.sh"
+# shellcheck source=sgw/install.sh
+. "$ROOT_DIR/sgw/install.sh"
 
 choose_mode() {
     local answer
@@ -48,38 +50,89 @@ health_service() {
 first_install() {
     require_root
     [[ ! -L $ENV_FILE ]] || die '.env must not be a symbolic link'
+    INSTALL_DOMAIN=''
+    trap 'installation_cleanup $?' EXIT
+    trap 'exit 130' INT TERM HUP
     check_os_arch_disk
-    if [[ -f $ENV_FILE ]]; then
-        chmod 0600 "$ENV_FILE"
-        info 'Existing installation detected; no credentials, keys, database or certificate changed'
-        printf '%s\n' 'Commands: --check --reset-admin-password --set-admin-secret-path --set-gateway-domain --configure-certificate --renew-certificate --uninstall --purge'
-        return
-    fi
     if ! command -v curl >/dev/null || ! command -v openssl >/dev/null \
         || ! dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -q 'install ok installed'; then
         install_packages_if_approved curl openssl ca-certificates
     fi
     check_platform
-    ensure_docker
-    local domain port username mode secret password hmac encryption
-    read -r -p 'Gateway FQDN: ' domain
-    valid_domain "$domain" || die 'Invalid gateway domain'
-    read -r -p 'Admin HTTPS port [64444]: ' port
-    port=${port:-64444}
-    valid_port "$port" && (( port >= 1024 && port != 443 )) || die 'Invalid Admin port'
-    read -r -p 'Administrator username [admin]: ' username
-    username=${username:-admin}
-    [[ $username =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die 'Invalid administrator username'
-    mode=$(choose_mode)
+    local domain port gateway_port username='' mode secret password='' hmac encryption
+    local fresh=no completed=no admin_line count certificate_changed=no images_changed=no
+    if [[ -f $ENV_FILE ]]; then
+        validate_install_environment
+        domain=$(env_value GATEWAY_DOMAIN)
+        port=$(env_value ADMIN_PORT)
+        gateway_port=$(env_value GATEWAY_HTTPS_PORT)
+        mode=$(env_value CERT_MODE)
+        secret=$(env_value ADMIN_SECRET_PATH)
+    else
+        [[ ! -e $RUNTIME/data/subscription-gateway.db && ! -e $RUNTIME/install-complete ]] \
+            || die 'Existing data without .env; restore .env from backup rather than generate new keys'
+        fresh=yes
+        read -r -p 'Gateway FQDN: ' domain
+        valid_domain "$domain" || die 'Invalid gateway domain'
+        read -r -p 'Admin HTTPS port [64444]: ' port
+        port=${port:-64444}
+        valid_port "$port" && (( port >= 1024 && port != 443 )) || die 'Invalid Admin port'
+        gateway_port=443
+        read -r -p 'Administrator username [admin]: ' username
+        username=${username:-admin}
+        [[ $username =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die 'Invalid administrator username'
+        mode=$(choose_mode)
+    fi
+    INSTALL_DOMAIN=$domain
+    ensure_port_tools
+    # Check public ports before certificate issuance, Docker installation/build,
+    # credentials or database writes. A running container of this project is OK.
+    assert_install_ports "$gateway_port" "$port"
+    if [[ $mode == http-01 ]] && ! certificate_verify \
+        "$RUNTIME/ssl/active/fullchain.pem" "$RUNTIME/ssl/active/privkey.pem" "$domain"; then
+        command -v ip >/dev/null || install_packages_if_approved iproute2
+        port_80_free || die 'Port 80 is occupied; select DNS-01 or existing certificate'
+        http_dns_matches_local "$domain" || die 'Domain A record does not match a local IPv4 address'
+    fi
     make_runtime
-    acquire_certificate "$mode" "$domain"
-    cert_activate "$domain" || die 'Initial certificate activation failed'
-    secret=$(openssl rand -hex 24)
-    password=$(openssl rand -hex 24)
-    hmac=$(openssl rand -base64 32 | tr -d '\n')
-    encryption=$(openssl rand -base64 32 | tr -d '\n')
-    [[ $hmac != "$encryption" ]] || die 'Generated keys collided'
-    cat > "$ENV_FILE.tmp" <<EOF
+    [[ ! -L $RUNTIME/install.lock ]] || die 'Unsafe installation lock'
+    command -v flock >/dev/null || die 'flock is required'
+    exec 8> "$RUNTIME/install.lock"
+    flock -n 8 || die 'Another installation is running'
+    [[ ! -e $RUNTIME/install-complete ]] || private_root_file "$RUNTIME/install-complete" \
+        || die 'Unsafe install-complete marker'
+    if install_completed; then completed=yes; fi
+    ensure_docker
+    if [[ $completed == yes ]]; then
+        if (check_install) >/dev/null 2>&1; then
+            info 'Existing installation detected; no credentials, keys, database or certificate changed'
+            trap - EXIT INT TERM HUP
+            exec 8>&-
+            return
+        fi
+        warning 'Installation exists but health check failed; attempting safe service recovery (see ./setup.sh --check)'
+    elif [[ $fresh == no ]]; then
+        info 'Incomplete installation detected; resuming with existing credentials, keys and data'
+    fi
+    if [[ $fresh == yes ]]; then
+        [[ ! -f $ENV_FILE ]] || die 'Installation changed while waiting for lock; run ./setup.sh again'
+        install_record_write "$RUNTIME/install-state" "ADMIN_USERNAME=$username"
+    fi
+    if [[ $mode != existing ]]; then ensure_cron; fi
+    if ! certificate_verify "$RUNTIME/ssl/active/fullchain.pem" "$RUNTIME/ssl/active/privkey.pem" "$domain"; then
+        acquire_certificate "$mode" "$domain"
+        cert_activate "$domain" yes || die 'Initial/recovery certificate activation failed'
+        certificate_changed=yes
+    else
+        info 'Valid active certificate reused; no new issuance'
+    fi
+    if [[ $fresh == yes ]]; then
+        secret=$(openssl rand -hex 24)
+        hmac=$(openssl rand -base64 32 | tr -d '\n')
+        encryption=$(openssl rand -base64 32 | tr -d '\n')
+        [[ $hmac != "$encryption" ]] || die 'Generated keys collided'
+        [[ ! -L $ENV_FILE.tmp ]] || die 'Unsafe temporary .env'
+        cat > "$ENV_FILE.tmp" <<EOF
 DATABASE_PATH=/data/subscription-gateway.db
 GATEWAY_DOMAIN=$domain
 GATEWAY_HTTPS_PORT=443
@@ -101,19 +154,72 @@ LOGIN_RATE_DIR=/tmp/subscription-gateway-login-rate
 TOKEN_HMAC_KEY=$hmac
 TOKEN_ENCRYPTION_KEY=$encryption
 EOF
-    chmod 0600 "$ENV_FILE.tmp"
-    sync -f "$ENV_FILE.tmp"
-    mv -f -- "$ENV_FILE.tmp" "$ENV_FILE"
+        chmod 0600 "$ENV_FILE.tmp"
+        sync -f "$ENV_FILE.tmp"
+        mv -f -- "$ENV_FILE.tmp" "$ENV_FILE"
+    fi
+    validate_install_environment
     compose config >/dev/null || die 'Docker Compose configuration invalid'
-    compose build || die 'Docker images could not be built'
-    admin_cli migrate >/dev/null || die 'SQLite initialization failed'
-    printf '%s' "$password" | admin_cli init-admin "$username" >/dev/null || die 'Administrator initialization failed'
-    compose up -d || die 'Container startup failed'
+    if ! installation_images_ready; then
+        compose build || die 'Docker images could not be built'
+        images_changed=yes
+    fi
+    if ! admin_cli installation-check >/dev/null 2>&1; then
+        admin_cli migrate >/dev/null || die 'SQLite initialization failed'
+    fi
+    admin_line=$(admin_cli admin-status) || die 'Cannot read administrator installation state'
+    read -r count username <<< "$admin_line"
+    if [[ $count == 0 ]]; then
+        if [[ -f $RUNTIME/install-state ]]; then
+            private_root_file "$RUNTIME/install-state" || die 'Unsafe install-state file'
+            username=$(install_record_value "$RUNTIME/install-state" ADMIN_USERNAME)
+        else
+            read -r -p 'Recovery administrator username [admin]: ' username
+            username=${username:-admin}
+        fi
+        [[ $username =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die 'Invalid recovery administrator username'
+        password=$(openssl rand -hex 24)
+        printf '%s' "$password" | admin_cli init-admin "$username" >/dev/null || die 'Administrator initialization failed'
+    elif [[ $count != 1 ]]; then
+        die 'Expected exactly one administrator; existing database was retained'
+    fi
+    if [[ $images_changed == yes ]] || ! wait_health; then
+        compose up -d || die 'Container startup failed'
+    fi
     wait_health || die 'Container healthcheck failed'
-    if [[ $mode != existing ]]; then register_acme_hook "$mode" "$domain" || die 'ACME renewal hook registration failed'; fi
-    info 'Installation completed; upstream is empty and Gateway is fail-closed'
+    compose exec -T gateway nginx -t || die 'Gateway nginx -t failed'
+    compose exec -T admin nginx -t || die 'Admin nginx -t failed'
+    if [[ $certificate_changed == yes ]]; then
+        compose exec -T gateway nginx -s reload && compose exec -T admin nginx -s reload \
+            || die 'Certificate reload failed'
+    fi
+    if [[ $mode != existing ]] && ! acme_renewal_ready "$domain"; then
+        register_acme_hook "$mode" "$domain" || die 'ACME renewal hook registration failed'
+    fi
+    check_install || die 'Installation integrity checks failed'
+    # Never keep plaintext passwords. An incomplete installation with an existing
+    # administrator gets a new password only after all readiness checks succeed.
+    if [[ $completed != yes && -z $password ]]; then
+        password=$(openssl rand -hex 24)
+        printf '%s' "$password" | admin_cli reset-admin-password >/dev/null || die 'Recovery password reset failed'
+    fi
+    local record="FORMAT=1"$'\n'"COMPLETED_AT=$(date -u +%FT%TZ)"$'\n'"CREDENTIALS_DELIVERED="
+    # A killed/failed password delivery leaves a pending marker, so the next run
+    # recovers the unknown password. No secret is stored in either marker state.
+    if [[ -n $password ]]; then install_record_write "$RUNTIME/install-complete" "${record}pending"; fi
     printf 'Admin: https://%s:%s/%s\n' "$domain" "$port" "$secret"
-    printf 'Username: %s\nInitial password (shown once): %s\n' "$username" "$password"
+    printf 'Username: %s\n' "$username"
+    if [[ -n $password ]]; then
+        if [[ $fresh == yes ]]; then printf 'Initial password (shown once): %s\n' "$password"
+        else printf 'Recovery administrator password (shown once): %s\n' "$password"; fi
+    else
+        info 'Services restored; existing administrator password unchanged'
+    fi
+    install_record_write "$RUNTIME/install-complete" "${record}yes"
+    unset password hmac encryption
+    trap - EXIT INT TERM HUP
+    exec 8>&-
+    info 'Installation completed'
 }
 reset_admin_password() {
     require_root
@@ -231,6 +337,7 @@ check_install() {
     local problems=0
     if check_platform; then info 'Platform and free space'; else warning 'Platform check failed'; problems=1; fi
     [[ -f $ENV_FILE ]] || die '.env missing'
+    validate_install_environment
     [[ $(stat -c %a "$ENV_FILE") == 600 ]] && info '.env permission 0600' \
         || { warning '.env should be 0600'; problems=1; }
     local domain dir version_line configured active
@@ -252,6 +359,7 @@ check_install() {
     if [[ -f $RUNTIME/ssl/active/fullchain.pem ]]; then
         openssl x509 -in "$RUNTIME/ssl/active/fullchain.pem" -noout -enddate || true
     fi
+    if ! installation_extra_checks; then problems=1; fi
     compose exec -T gateway nginx -t >/dev/null 2>&1 && info 'Gateway nginx -t passed' \
         || { warning 'Gateway nginx -t failed'; problems=1; }
     compose exec -T admin nginx -t >/dev/null 2>&1 && info 'Admin nginx -t passed' \
@@ -292,6 +400,7 @@ purge_installation() {
     info 'Project runtime data and .env removed; global Docker and acme.sh data retained'
 }
 
+setup_main() {
 [[ ! -L $ENV_FILE ]] || die '.env must not be a symbolic link'
 case ${1:-} in
     '') first_install;;
@@ -306,3 +415,5 @@ case ${1:-} in
     --purge) purge_installation;;
     *) die 'Unknown command';;
 esac
+}
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then setup_main "$@"; fi

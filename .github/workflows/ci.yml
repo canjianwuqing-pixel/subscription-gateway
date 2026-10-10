@@ -38,7 +38,10 @@ jobs:
           set -euo pipefail
           php tests/run.php
           bash tests/watch_fake.sh
-          bash tests/ops_fake.sh
+          sudo bash tests/ops_fake.sh
+      - name: Exercise first installation and safe resume without live ACME
+        shell: bash
+        run: sudo bash tests/install_fake.sh
       - name: Build and exercise real Docker/Nginx stack
         shell: bash
         run: bash tests/ci_docker.sh
