@@ -69,6 +69,7 @@ test_case('entry host validation accepts hostnames and IPs but rejects URLs and 
 });
 
 test_case('active leaves can be configured with normalized relation mappings', function () use ($phase4Pdo): void {
+    tracking_sync_source_hosts($phase4Pdo, ['origin.example.invalid']);
     foreach (tracking_active_leaves($phase4Pdo) as $leaf) {
         tracking_save_group_mappings($phase4Pdo, (int) $leaf['id'], [[
             'source_host' => 'ORIGIN.EXAMPLE.INVALID',

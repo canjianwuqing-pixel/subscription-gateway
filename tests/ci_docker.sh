@@ -744,7 +744,7 @@ request "$path?token=$token&format=sources6"
 admin_request api/tracking
 jq -e '.tracking.source_stats.current==6' "$temporary/admin-response" >/dev/null || fail 'current source count is not six'
 cp "$temporary/admin-response" "$temporary/source-tracking.json"
-leaf_ids=$(jq -r '.tracking.groups[] | select(.status=="ACTIVE" and .path!="root" and .has_active_children==false) | .id' "$temporary/source-tracking.json")
+leaf_ids=$(jq -r '.tracking.groups[] | select(.status=="ACTIVE" and .path!="root" and .has_active_children==0) | .id' "$temporary/source-tracking.json")
 for leaf_id in $leaf_ids; do
     jq --argjson id "$leaf_id" '{mappings:[.tracking.groups[] | select(.id==$id) | .mappings[] |
         {source_host,target_host:(if (.source_host|test("^na00[1-5]\\.example\\.com$")) then "partial.example.invalid"
@@ -774,7 +774,7 @@ PY
 done
 admin_request api/tracking
 jq -e --argjson id "$binary_parent" '.tracking.groups[] | select(.id==$id) |
-    .mapping_count==6 and .mapping_filled_count==5 and .has_active_children==false and .split_at!=null' \
+    .mapping_count==6 and .mapping_filled_count==5 and .has_active_children==0 and .split_at!=null' \
     "$temporary/admin-response" >/dev/null || fail 'current 5/6 counts or historical split time changed'
 
 # Source mutations must require authentication and CSRF, accept unseen values,
