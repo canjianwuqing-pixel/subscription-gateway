@@ -48,7 +48,7 @@ test_case('v4 initialization does not change existing root groups or assignments
     [$db] = flexible_split_fixture();
     $before = binary_snapshot($db);
     initialize_database($db);
-    expect_same(4, (int) $db->query('PRAGMA user_version')->fetchColumn());
+    expect_same(5, (int) $db->query('PRAGMA user_version')->fetchColumn());
     expect_same($before, binary_snapshot($db));
     expect_same(['1', '2', '3'], array_column(tracking_children($db, 1), 'path'));
 });
@@ -126,7 +126,7 @@ $undoChecks = [
         }
     },
     'keeps schema and foreign-key integrity intact' => function ($db): void {
-        expect_same(4, (int) $db->query('PRAGMA user_version')->fetchColumn());
+        expect_same(5, (int) $db->query('PRAGMA user_version')->fetchColumn());
         expect_same([], $db->query('PRAGMA foreign_key_check')->fetchAll());
         expect_same(['ok'], $db->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN));
     },
@@ -166,7 +166,7 @@ foreach (['null target', 'missing source', 'new source'] as $reason) {
         tracking_set_mode($db, 'enforced');
         $before = binary_snapshot($db);
         try { tracking_undo_split($db, $parent); throw new RuntimeException('Undo unexpectedly succeeded'); }
-        catch (DomainException $error) { expect_same('父组入口映射不完整，请补齐后再撤销拆分。', $error->getMessage()); }
+        catch (DomainException $error) { expect_same('父组当前没有可用映射，请配置至少1个当前目标入口后再撤销拆分。', $error->getMessage()); }
         expect_same($before, binary_snapshot($db));
     });
 }

@@ -61,14 +61,15 @@ foreach (['https://example.com', 'example.com:443', '/path', 'bad host', 'exampl
 }
 
 foreach (['empty' => '', 'null' => null, 'missing' => null] as $kind => $target) {
-    test_case('Browser JSON rejects ACTIVE ' . $kind . ' target', function () use ($kind, $target): void {
+    test_case('Browser JSON allows ACTIVE ' . $kind . ' target for node filtering', function () use ($kind, $target): void {
         [$pdo, $groupId] = mapping_json_fixture();
         $before = tracking_group_mappings($pdo, $groupId);
         $row = ['source_host' => 'na001.example.com'];
         if ($kind !== 'missing') $row['target_host'] = $target;
         $raw = json_encode(['mappings' => [$row]], JSON_THROW_ON_ERROR);
-        expect_exception(fn () => mapping_json_save($pdo, $groupId, $raw), InvalidArgumentException::class);
-        expect_same($before, tracking_group_mappings($pdo, $groupId));
+        mapping_json_save($pdo, $groupId, $raw);
+        expect_same(null, tracking_group_mappings($pdo, $groupId)[0]['target_host']);
+        expect_same([], tracking_effective_mapping($pdo, $groupId));
     });
 }
 

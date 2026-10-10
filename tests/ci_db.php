@@ -66,6 +66,7 @@ switch ($command) {
         $mode = (string) ($argv[3] ?? '');
         validate_token_format($token);
         tracking_assignment_for_hash($pdo, token_hash_value($token));
+        tracking_sync_source_hosts($pdo, ['origin.example.invalid']);
         foreach (tracking_active_leaves($pdo) as $leaf) {
             tracking_save_group_mappings($pdo, (int) $leaf['id'], [[
                 'source_host' => 'origin.example.invalid',
@@ -127,7 +128,7 @@ switch ($command) {
     case 'assert-binary-history':
         $parent = (int) ($argv[2] ?? 0);
         $children = tracking_children($pdo, $parent, 'ARCHIVED');
-        if (count($children) < 2 || (int) $pdo->query('PRAGMA user_version')->fetchColumn() !== 4
+        if (count($children) < 2 || (int) $pdo->query('PRAGMA user_version')->fetchColumn() !== 5
             || $pdo->query('PRAGMA foreign_key_check')->fetchAll() !== []
             || $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok']) {
             throw new RuntimeException('Binary split history or SQLite integrity check failed');

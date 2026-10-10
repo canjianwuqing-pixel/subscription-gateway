@@ -365,6 +365,14 @@ for mapping_case in tampered missing extra duplicate string integer null empty s
     esac
     jq -n --argjson rows "$mapping_rows" '{mappings:$rows}' > "$temporary/mapping.json"
     mapping_put
+    if [[ $mapping_case == empty ]]; then
+        [[ $admin_code == 200 ]] && jq -e '.mappings[0].target_host == null' "$temporary/admin-response" >/dev/null \
+            || fail 'empty target was not saved for safe filtering'
+        jq -n '{mappings:[{source_host:"origin.example.invalid",target_host:"2001:db8::1"}]}' > "$temporary/mapping.json"
+        mapping_put
+        [[ $admin_code == 200 ]] || fail 'mapping restoration after empty target failed'
+        continue
+    fi
     case $mapping_case in
         tampered|missing|extra|duplicate) [[ $admin_code == 409 ]] || fail 'source set change was not rejected' ;;
         *) [[ $admin_code == 422 ]] || fail 'invalid mapping row or target was not rejected' ;;
@@ -724,6 +732,142 @@ for binary_round in 1 2; do
 done
 db tracking-mode off
 publish
-unset admin_csrf
 printf 'PASS: real HTTP binary activation, ACTIVE undo, archived re-split, direct-parent return, unchanged siblings and Gateway mappings\n'
+
+# Exercise source lifecycle and partial delivery through real TLS, sessions,
+# CSRF, Transformer, SQLite and Nginx, not just parser unit tests.
+assignment_before=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php assignment-digest)
+db tracking-mode preflight
+publish
+request "$path?token=$token&format=sources6"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'six-source observation failed'
+admin_request api/tracking
+jq -e '.tracking.source_stats.current==6' "$temporary/admin-response" >/dev/null || fail 'current source count is not six'
+cp "$temporary/admin-response" "$temporary/source-tracking.json"
+leaf_ids=$(jq -r '.tracking.groups[] | select(.status=="ACTIVE" and .path!="root" and .has_active_children==false) | .id' "$temporary/source-tracking.json")
+for leaf_id in $leaf_ids; do
+    jq --argjson id "$leaf_id" '{mappings:[.tracking.groups[] | select(.id==$id) | .mappings[] |
+        {source_host,target_host:(if (.source_host|test("^na00[1-5]\\.example\\.com$")) then "partial.example.invalid"
+            elif .source_host=="na006.example.com" then null else .target_host end)}]}' \
+        "$temporary/source-tracking.json" > "$temporary/partial-mapping.json"
+    admin_request "api/tracking/groups/$leaf_id/mappings" --request PUT \
+        --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/partial-mapping.json"
+    [[ $admin_code == 200 ]] || fail 'partial mapping save rejected'
+done
+admin_request api/tracking/mode --request PATCH --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data '{"mode":"enforced"}'
+[[ $admin_code == 200 || $admin_code == 202 ]] || fail '5/6 enforced mode rejected'
+publish
+for format in sources6 sources-base64; do
+    request "$path?token=$token&format=$format"
+    [[ $request_exit == 0 && $request_code == 200 ]] || fail 'partial URI/Base64 did not return 200'
+    python3 - "$temporary/response" "$format" <<'PY'
+import base64, pathlib, sys
+body = pathlib.Path(sys.argv[1]).read_bytes()
+if sys.argv[2] == "sources-base64":
+    body = base64.b64decode(body + b"=" * (-len(body) % 4))
+assert body.startswith("剩余流量：88GB\r\n# 公告\r\n\r\n".encode())
+assert body.count(b"trojan://") == 5 and body.count(b"@partial.example.invalid:443") == 5
+assert b"na006.example.com" not in body and b"@na00" not in body
+assert body.count(b"?sni=sni.example.com&flag=keep#Node") == 5
+PY
+done
+admin_request api/tracking
+jq -e --argjson id "$binary_parent" '.tracking.groups[] | select(.id==$id) |
+    .mapping_count==6 and .mapping_filled_count==5 and .has_active_children==false and .split_at!=null' \
+    "$temporary/admin-response" >/dev/null || fail 'current 5/6 counts or historical split time changed'
+
+# Source mutations must require authentication and CSRF, accept unseen values,
+# preserve per-group targets on rename, and never overwrite an existing source.
+admin_request api/tracking/sources --request POST --header 'Content-Type: application/json' --data '{"source_host":"backup.example.com"}'
+[[ $admin_code == 403 ]] || fail 'source add accepted missing CSRF'
+primary_cookie=$admin_cookie
+admin_cookie=$temporary/anonymous-source-cookie
+admin_request api/tracking/sources --request POST --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data '{"source_host":"backup.example.com"}'
+[[ $admin_code == 401 ]] || fail 'anonymous source add accepted'
+admin_cookie=$primary_cookie
+admin_request api/tracking/sources --request POST --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data '{"source_host":"backup.example.com"}'
+[[ $admin_code == 200 ]] && jq -e '.source.state=="UNSEEN"' "$temporary/admin-response" >/dev/null || fail 'unseen source add failed'
+admin_request api/tracking/sources --request POST --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data '{"source_host":"https://unsafe.example.com"}'
+[[ $admin_code == 422 ]] || fail 'source add accepted URL'
+admin_request api/tracking/sources/na001.example.com --request PATCH --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data '{"source_host":"na002.example.com"}'
+[[ $admin_code == 409 ]] || fail 'source rename overwrote existing source'
+admin_request api/tracking/sources/na001.example.com --request PATCH --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data '{"source_host":"renamed.example.com"}'
+[[ $admin_code == 200 ]] && jq -e '.source.state=="UNSEEN"' "$temporary/admin-response" >/dev/null || fail 'unseen source rename failed'
+request "$path?token=$token&format=sources6"
+[[ $request_exit == 0 && $request_code == 200 && $(grep -c '^trojan://' "$temporary/response") == 4 ]] \
+    || fail 'renamed old source was not filtered'
+admin_request api/tracking
+jq -e '.tracking.source_stats.current==5 and .tracking.source_stats.manual_unseen==2 and
+    any(.tracking.sources[]; .source_host=="na001.example.com" and .state=="DELETED" and .in_latest==1) and
+    all(.tracking.groups[] | select(.status=="ACTIVE" and .path!="root") | .mappings[] | select(.source_host=="renamed.example.com"); .target_host=="partial.example.invalid")' \
+    "$temporary/admin-response" >/dev/null || fail 'rename failed to retain targets or tombstone'
+admin_request api/tracking/sources/na002.example.com --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 200 ]] || fail 'deleting an in-use source was prohibited'
+request "$path?token=$token&format=sources6"
+[[ $request_exit == 0 && $request_code == 200 && $(grep -c '^trojan://' "$temporary/response") == 3 ]] \
+    || fail 'deleted source was not safely filtered'
+for source in na001.example.com na002.example.com; do
+    admin_request "api/tracking/sources/$source/restore" --request POST --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 200 ]] && jq -e '.source.state=="CURRENT"' "$temporary/admin-response" >/dev/null || fail 'current source restore failed'
+done
+
+request "$path?token=$token&format=sources-yaml"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'safe partial YAML failed'
+compose exec -T admin su-exec www-data php -r '
+    $doc=yaml_parse(stream_get_contents(STDIN));
+    if (count($doc["proxies"])!==5 || $doc["proxy-groups"][0]["proxies"]!==["Node1","Node2","Node3","Node4","Node5","DIRECT","REJECT"]
+        || $doc["proxy-groups"][1]["proxies"]!==["Select","DIRECT"]) exit(1);
+    foreach($doc["proxies"] as $proxy) if($proxy["server"]!=="partial.example.invalid") exit(1);
+' < "$temporary/response" || fail 'YAML proxy/reference cleanup or builtins failed'
+
+admin_request api/tracking
+snapshot_before=$(jq -c '{snapshot:.tracking.latest_snapshot, sources:.tracking.sources}' "$temporary/admin-response")
+for format in unknown malformed large unauthorized redirect truncated empty-group; do
+    request "$path?token=$token&format=$format"
+    case "$format" in unauthorized) expected=401;; redirect) expected=302;; *) expected=502;; esac
+    [[ $request_exit == 0 && $request_code == "$expected" ]] || fail "failed $format returned unexpected status"
+    if grep -Fq '@na00' "$temporary/response"; then fail 'failed conversion leaked original source'; fi
+    admin_request api/tracking
+    [[ $snapshot_before == "$(jq -c '{snapshot:.tracking.latest_snapshot, sources:.tracking.sources}' "$temporary/admin-response")" ]] \
+        || fail "failed $format changed successful snapshot or missing counts"
+done
+# HEAD uses the same actual subscription URL, without consuming a body/snapshot.
+head_code=$(curl --silent --show-error --insecure --noproxy '*' --head --resolve gateway.test:18443:127.0.0.1 \
+    --output "$temporary/head-response" --write-out '%{http_code}' "https://gateway.test:18443$path?token=$token&format=sources5")
+[[ $head_code == 200 ]] || fail 'HEAD did not preserve upstream status'
+admin_request api/tracking
+[[ $snapshot_before == "$(jq -c '{snapshot:.tracking.latest_snapshot, sources:.tracking.sources}' "$temporary/admin-response")" ]] \
+    || fail 'HEAD updated source snapshot'
+
+for source in na001.example.com na002.example.com na003.example.com na004.example.com na005.example.com; do
+    admin_request "api/tracking/sources/$source" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 200 ]] || fail 'deleting last usable source was prohibited'
+done
+for format in sources6 sources-base64 sources-yaml; do
+    request "$path?token=$token&format=$format"
+    [[ $request_exit == 0 && $request_code == 503 ]] || fail 'all filtered did not return 503'
+    [[ $(<"$temporary/response") == 'Subscription transformation unavailable.' ]] || fail 'all-filtered response leaked body or returned metadata-only success'
+done
+for source in na001.example.com na002.example.com na003.example.com na004.example.com na005.example.com; do
+    admin_request "api/tracking/sources/$source/restore" --request POST --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 200 ]] || fail 'restoring usable sources failed'
+done
+request "$path?token=$token&format=sources5"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'five-source snapshot failed'
+admin_request api/tracking
+jq -e '.tracking.source_stats.current==5 and any(.tracking.sources[]; .source_host=="na006.example.com" and .state=="SUSPECT" and .missing_count==1)
+    and .tracking.stats_24h.partial_successes>=5 and .tracking.stats_24h.no_usable_nodes>=3 and .tracking.stats_24h.skipped_nodes>=18' \
+    "$temporary/admin-response" >/dev/null || fail 'six-to-five lifecycle or partial/no-usable telemetry failed'
+[[ $assignment_before == "$(compose exec -T admin su-exec www-data php /tmp/ci_db.php assignment-digest)" ]] \
+    || fail 'source lifecycle or filtering changed Token assignments'
+db tracking-mode off
+publish
+unset admin_csrf
+printf 'PASS: real HTTP source CRUD/auth/CSRF, 6-to-5 lifecycle, partial URI/Base64/YAML, safe references, all-filtered 503, failed/HEAD snapshots and unchanged assignments\n'
 printf 'PASS: real Linux Docker, Nginx, mock upstream, rules, expiry, logs and permissions\n'

@@ -158,7 +158,7 @@ function transformer_error(int $status): never
 
 function transformer_failure_status(string $reason): int
 {
-    return in_array($reason, ['MAPPING_INCOMPLETE', 'INTERNAL_ERROR'], true) ? 503 : 502;
+    return in_array($reason, ['MAPPING_INCOMPLETE', 'NO_USABLE_NODES', 'INTERNAL_ERROR'], true) ? 503 : 502;
 }
 
 function transformer_main(): never
@@ -205,7 +205,11 @@ function transformer_main(): never
         transformer_error(502);
     }
 
-    if ($response['status'] < 200 || $response['status'] >= 300 || $method === 'HEAD') {
+    if ($response['status'] < 200 || $response['status'] >= 300) {
+        tracking_record_transform_event_safe($pdo, null, $mode, 'UNKNOWN', 'UPSTREAM_ERROR');
+        transformer_emit_upstream($response, $method);
+    }
+    if ($method === 'HEAD') {
         transformer_emit_upstream($response, $method);
     }
 
@@ -239,7 +243,7 @@ function transformer_main(): never
     }
 
     $body = stream_get_contents($response['stream']);
-    if (!is_string($body)) {
+    if (!is_string($body) || strlen($body) !== $response['size']) {
         tracking_record_transform_event_safe($pdo, $groupId, $mode, 'UNKNOWN', 'INTERNAL_ERROR');
         if ($mode === 'preflight') {
             transformer_emit_upstream($response, $method);
@@ -248,12 +252,8 @@ function transformer_main(): never
         transformer_error(503);
     }
     try {
-        // Learn the complete, validated connection-host set before requiring a
-        // configured mapping. No client response bytes are changed by learning.
-        tracking_sync_source_hosts($pdo, tracking_subscription_source_hosts($body));
-        $mapping = tracking_effective_mapping($pdo, $groupId);
-        $transformed = tracking_transform_subscription_body($body, $mapping);
-        tracking_record_transform_event_safe($pdo, $groupId, $mode, $transformed['format'], 'SUCCESS');
+        $transformed = tracking_process_subscription($pdo, $groupId, $body);
+        tracking_record_transform_event_safe($pdo, $groupId, $mode, $transformed['format'], $transformed['outcome'], $transformed);
         if ($mode === 'preflight') {
             transformer_emit_upstream($response, $method);
         }
@@ -264,7 +264,7 @@ function transformer_main(): never
         fclose($response['stream']);
         transformer_error(503);
     } catch (TrackingTransformFailure $failure) {
-        tracking_record_transform_event_safe($pdo, $groupId, $mode, $failure->format, $failure->reason);
+        tracking_record_transform_event_safe($pdo, $groupId, $mode, $failure->format, $failure->reason, $failure->counts);
         if ($mode === 'preflight') {
             transformer_emit_upstream($response, $method);
         }

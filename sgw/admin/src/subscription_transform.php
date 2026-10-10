@@ -9,10 +9,22 @@ final class TrackingTransformFailure extends RuntimeException
     public function __construct(
         public readonly string $reason,
         public readonly string $format = 'UNKNOWN',
-        string $message = 'Subscription transformation failed'
+        string $message = 'Subscription transformation failed',
+        public readonly array $counts = []
     ) {
         parent::__construct($message);
     }
+}
+
+/** Internal control flow: only a validated known node may be filtered. */
+final class TrackingUnmappedNode extends RuntimeException {}
+
+function tracking_transform_result(string $content, string $format, int $total, int $emitted): array
+{
+    $counts = ['total_nodes' => $total, 'emitted_nodes' => $emitted, 'skipped_nodes' => $total - $emitted];
+    if ($emitted === 0) throw new TrackingTransformFailure('NO_USABLE_NODES', $format, 'No usable proxy nodes', $counts);
+    return ['content' => $content, 'format' => $format, 'node_count' => $emitted,
+        'outcome' => $total === $emitted ? 'SUCCESS' : 'PARTIAL_SUCCESS'] + $counts;
 }
 
 /** Metadata-only identity pass through the same structured parser/validation. */
@@ -88,7 +100,7 @@ function tracking_mapped_host(string $host, array $mapping, string $format, ?Tra
     }
     if ($sources !== null) return $sources->collect($normalized, $format);
     if (!array_key_exists($normalized, $mapping)) {
-        throw new TrackingTransformFailure('MAPPING_INCOMPLETE', $format, 'Entry mapping is incomplete');
+        throw new TrackingUnmappedNode();
     }
     return $mapping[$normalized];
 }
@@ -219,6 +231,7 @@ function tracking_try_transform_uri_list(string $body, array $mapping, ?Tracking
         throw new TrackingTransformFailure('PARSE_FAILED', 'URI');
     }
     $nodes = 0;
+    $emitted = 0;
     $vmessNodes = 0;
     foreach ($parts as $index => $part) {
         if ($part === "\r\n" || $part === "\n" || $part === "\r") {
@@ -238,24 +251,27 @@ function tracking_try_transform_uri_list(string $body, array $mapping, ?Tracking
             continue;
         }
         $scheme = strtolower($match[1]);
-        if ($scheme === 'vmess') {
-            $replacement = tracking_transform_vmess_uri($line, $mapping, $sources);
-            $vmessNodes++;
-        } elseif ($scheme === 'ss') {
-            $replacement = tracking_transform_ss_uri($line, $mapping, $sources);
-        } else {
-            $replacement = tracking_transform_authority_uri($line, $mapping, 'URI', $sources)['content'];
+        $nodes++;
+        if ($scheme === 'vmess') $vmessNodes++;
+        try {
+            if ($scheme === 'vmess') $replacement = tracking_transform_vmess_uri($line, $mapping, $sources);
+            elseif ($scheme === 'ss') $replacement = tracking_transform_ss_uri($line, $mapping, $sources);
+            else $replacement = tracking_transform_authority_uri($line, $mapping, 'URI', $sources)['content'];
+        } catch (TrackingUnmappedNode) {
+            $parts[$index] = '';
+            // Remove this node's terminator, not surrounding metadata/blank lines.
+            if (isset($parts[$index + 1])) $parts[$index + 1] = '';
+            continue;
         }
         $leading = substr($part, 0, strlen($part) - strlen(ltrim($part)));
         $trailing = substr($part, strlen(rtrim($part)));
         $parts[$index] = $leading . $replacement . $trailing;
-        $nodes++;
+        $emitted++;
     }
     if ($nodes === 0) {
         return null;
     }
-    return ['content' => implode('', $parts), 'format' => $vmessNodes === $nodes ? 'VMESS' : 'URI',
-        'node_count' => $nodes];
+    return tracking_transform_result(implode('', $parts), $vmessNodes === $nodes ? 'VMESS' : 'URI', $nodes, $emitted);
 }
 
 /**
@@ -271,35 +287,75 @@ function tracking_try_transform_yaml(string $body, array $mapping, ?TrackingSour
         throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'YAML extension is unavailable');
     }
     $document = @yaml_parse($body);
-    if (!is_array($document) || !isset($document['proxies']) || !is_array($document['proxies'])) {
+    if (!is_array($document) || !isset($document['proxies']) || !is_array($document['proxies']) || !array_is_list($document['proxies'])) {
         throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Clash YAML proxies are invalid');
     }
-    $original = $document;
-    $nodes = 0;
-    foreach ($document['proxies'] as $index => &$proxy) {
-        if (!is_array($proxy) || !is_string($proxy['server'] ?? null)) {
+    $total = count($document['proxies']);
+    if ($total === 0) throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Clash YAML has no proxies');
+    $names = [];
+    foreach ($document['proxies'] as $proxy) {
+        if (!is_array($proxy) || !is_string($proxy['server'] ?? null)
+            || !is_string($proxy['name'] ?? null) || $proxy['name'] === '' || isset($names[$proxy['name']])) {
             throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Clash proxy server is invalid');
         }
-        $proxy['server'] = tracking_mapped_host($proxy['server'], $mapping, 'YAML', $sources);
-        $nodes++;
+        if (!in_array(strtolower((string) ($proxy['type'] ?? '')), ['vless','vmess','trojan','ss','hysteria2','hy2','tuic'], true))
+            throw new TrackingTransformFailure('UNKNOWN_FORMAT', 'YAML', 'Unsupported proxy type');
+        $names[$proxy['name']] = true;
     }
-    unset($proxy);
-    if ($nodes === 0) {
-        throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Clash YAML has no proxies');
+    $groups = $document['proxy-groups'] ?? [];
+    if (!is_array($groups) || !array_is_list($groups)) throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Proxy groups are invalid');
+    $groupNames = [];
+    $builtins = array_fill_keys(['DIRECT','REJECT','REJECT-DROP','PASS','COMPATIBLE','GLOBAL'], true);
+    foreach ($names as $name => $_) if (isset($builtins[$name])) throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Reserved proxy name');
+    foreach ($groups as $group) {
+        if (!is_array($group) || !is_string($group['name'] ?? null) || $group['name'] === ''
+            || isset($names[$group['name']]) || isset($groupNames[$group['name']]) || isset($builtins[$group['name']]))
+            throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Ambiguous proxy group name');
+        $groupNames[$group['name']] = true;
     }
-    $comparison = $document;
-    foreach ($comparison['proxies'] as $index => &$proxy) {
-        $proxy['server'] = $original['proxies'][$index]['server'];
+    foreach ($groups as $group) {
+        $refs = $group['proxies'] ?? [];
+        if (!is_array($refs) || !array_is_list($refs)) throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Proxy references are invalid');
+        foreach ($refs as $ref) if (!is_string($ref) || (!isset($names[$ref]) && !isset($groupNames[$ref]) && !isset($builtins[$ref])))
+            throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Dangling proxy reference');
+        if ($refs === [] && empty($group['use'])) throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Empty proxy group');
     }
-    unset($proxy);
-    if ($comparison !== $original) {
-        throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Clash YAML integrity validation failed');
+    $byName = array_column($groups, null, 'name');
+    $visiting = []; $visited = [];
+    $visit = static function (string $name) use (&$visit, &$visiting, &$visited, $byName): void {
+        if (isset($visiting[$name])) throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Cyclic proxy groups');
+        if (isset($visited[$name])) return;
+        $visiting[$name] = true;
+        foreach ($byName[$name]['proxies'] ?? [] as $ref) if (isset($byName[$ref])) $visit($ref);
+        unset($visiting[$name]); $visited[$name] = true;
+    };
+    foreach (array_keys($byName) as $name) $visit((string) $name);
+    $kept = [];
+    $removed = [];
+    foreach ($document['proxies'] as $proxy) {
+        try { $proxy['server'] = tracking_mapped_host($proxy['server'], $mapping, 'YAML', $sources); }
+        catch (TrackingUnmappedNode) { $removed[$proxy['name']] = true; continue; }
+        $kept[] = $proxy;
     }
+    if ($kept === []) return tracking_transform_result('', 'YAML', $total, 0);
+    $document['proxies'] = $kept;
+    foreach ($groups as &$group) {
+        $hadRefs = array_key_exists('proxies', $group);
+        $refs = $group['proxies'] ?? [];
+        $group['proxies'] = array_values(array_filter($refs, static fn ($ref) => !isset($removed[$ref])));
+        // Provider-only/dynamic or empty groups cannot be safely repaired by
+        // this local filter. Fail closed instead of inventing a DIRECT fallback.
+        if ($removed !== [] && ($group['proxies'] === [] || !empty($group['use']) || !empty($group['include-all'])))
+            throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Filtering would make proxy groups unsafe');
+        if (!$hadRefs) unset($group['proxies']);
+    }
+    unset($group);
+    if (array_key_exists('proxy-groups', $document)) $document['proxy-groups'] = $groups;
     $encoded = @yaml_emit($document, YAML_UTF8_ENCODING, YAML_LN_BREAK);
     if (!is_string($encoded)) {
         throw new TrackingTransformFailure('VALIDATION_FAILED', 'YAML', 'Clash YAML encoding failed');
     }
-    return ['content' => $encoded, 'format' => 'YAML', 'node_count' => $nodes];
+    return tracking_transform_result($encoded, 'YAML', $total, count($kept));
 }
 
 function tracking_looks_like_base64(string $body): bool
@@ -314,9 +370,6 @@ function tracking_looks_like_base64(string $body): bool
  */
 function tracking_transform_subscription_body(string $body, array $mapping, bool $allowOuterBase64 = true, ?TrackingSourceCollector $sources = null): array
 {
-    if ($mapping === [] && $sources === null) {
-        throw new TrackingTransformFailure('MAPPING_INCOMPLETE', 'UNKNOWN', 'Entry mapping is empty');
-    }
     $yaml = tracking_try_transform_yaml($body, $mapping, $sources);
     if ($yaml !== null) {
         return $yaml;
@@ -338,10 +391,26 @@ function tracking_transform_subscription_body(string $body, array $mapping, bool
             }
             $inner = tracking_transform_subscription_body($decoded['decoded'], $mapping, false, $sources);
         } catch (TrackingTransformFailure $failure) {
-            throw new TrackingTransformFailure($failure->reason, 'BASE64', $failure->getMessage());
+            throw new TrackingTransformFailure($failure->reason, 'BASE64', $failure->getMessage(), $failure->counts);
         }
-        return ['content' => $leading . tracking_encode_base64($inner['content'], $decoded) . $trailing,
-            'format' => 'BASE64', 'node_count' => $inner['node_count']];
+        return array_replace($inner, ['content' => $leading . tracking_encode_base64($inner['content'], $decoded) . $trailing, 'format' => 'BASE64']);
     }
     throw new TrackingTransformFailure('UNKNOWN_FORMAT', 'UNKNOWN', 'Subscription format is unsupported');
+}
+
+/** Parse before changing lifecycle; filtering and source edits share one write
+ * transaction. Zero usable nodes is a valid observation, not a parse failure. */
+function tracking_process_subscription(PDO $pdo, int $groupId, string $body): array
+{
+    $hosts = tracking_subscription_source_hosts($body);
+    $result = write_transaction($pdo, static function () use ($pdo, $groupId, $body, $hosts): array|TrackingTransformFailure {
+        tracking_sync_source_hosts($pdo, $hosts);
+        try { return tracking_transform_subscription_body($body, tracking_effective_mapping($pdo, $groupId)); }
+        catch (TrackingTransformFailure $failure) {
+            if ($failure->reason !== 'NO_USABLE_NODES') throw $failure;
+            return $failure;
+        }
+    });
+    if ($result instanceof TrackingTransformFailure) throw $result;
+    return $result;
 }

@@ -22,6 +22,7 @@ function schema_v3_fixture(): PDO
     save_token($db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'WHITELIST');
     add_ip_rule($db, '192.0.2.0/24', 'BLACKLIST');
     add_ua_rule($db, 'SchemaClient', 'WHITELIST');
+    schema_remove_v5_fixture($db);
     $db->exec('PRAGMA foreign_keys=OFF');
     $db->beginTransaction();
     $db->exec(<<<'SQL'
@@ -55,11 +56,11 @@ $schemaBeforeFks = [];
 foreach (['tracking_groups', 'tracking_assignments', 'tracking_entry_mappings', 'tracking_transform_events'] as $table) {
     $schemaBeforeFks[$table] = $schemaV3Pdo->query('PRAGMA foreign_key_list(' . $table . ')')->fetchAll();
 }
-test_case('Real v3 schema migrates to v4 and initialization is idempotent', function () use ($schemaV3Pdo): void {
+test_case('Real v3 schema migrates through v4 to v5 and initialization is idempotent', function () use ($schemaV3Pdo): void {
     expect_same(3, (int) $schemaV3Pdo->query('PRAGMA user_version')->fetchColumn());
     expect_true(str_contains($schemaV3Pdo->query("SELECT sql FROM sqlite_master WHERE name='tracking_groups'")->fetchColumn(), 'BETWEEN 1 AND 3'));
     initialize_database($schemaV3Pdo);
-    expect_same(4, (int) $schemaV3Pdo->query('PRAGMA user_version')->fetchColumn());
+    expect_same(5, (int) $schemaV3Pdo->query('PRAGMA user_version')->fetchColumn());
     initialize_database($schemaV3Pdo);
 });
 foreach (['id', 'parent_id', 'child_no', 'path', 'status', 'split_at', 'created_at', 'updated_at'] as $column) {
@@ -69,7 +70,8 @@ foreach (['id', 'parent_id', 'child_no', 'path', 'status', 'split_at', 'created_
 }
 foreach (array_keys($schemaBefore) as $table) {
     test_case('v3 migration preserves every row and column of ' . $table, function () use ($schemaV3Pdo, $schemaBefore, $table): void {
-        expect_same($schemaBefore[$table], $schemaV3Pdo->query('SELECT * FROM ' . $table . ' ORDER BY 1')->fetchAll());
+        $columns = $table === 'tracking_transform_events' ? 'id,group_id,mode,format,outcome,created_at' : '*';
+        expect_same($schemaBefore[$table], $schemaV3Pdo->query('SELECT ' . $columns . ' FROM ' . $table . ' ORDER BY 1')->fetchAll());
     });
 }
 test_case('v3 migration retains foreign key definitions and enforcement', function () use ($schemaV3Pdo, $schemaBeforeFks): void {
@@ -86,7 +88,7 @@ test_case('v3 migration retains exact root IDs paths and all fixed Token assignm
 });
 test_case('Fresh v4 database allows child_no beyond three and enforces root constraints', function (): void {
     [$db, $parent] = mapping_json_fixture();
-    expect_same(4, (int) $db->query('PRAGMA user_version')->fetchColumn());
+    expect_same(5, (int) $db->query('PRAGMA user_version')->fetchColumn());
     $db->exec("INSERT INTO tracking_groups (parent_id,child_no,path,status,created_at,updated_at) VALUES (2,99,'1.99','DRAFT',1,1)");
     expect_same(99, (int) $db->query("SELECT child_no FROM tracking_groups WHERE path='1.99'")->fetchColumn());
     foreach (["UPDATE tracking_groups SET child_no=1 WHERE path='root'",

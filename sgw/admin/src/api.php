@@ -689,7 +689,29 @@ function handle_api(string $route, string $method): never
                 'mode' => tracking_mode($pdo),
                 'groups' => tracking_list_groups($pdo),
                 'stats_24h' => tracking_transform_stats($pdo),
+                'sources' => tracking_list_sources($pdo),
+                'source_stats' => tracking_source_stats($pdo),
+                'latest_snapshot' => $pdo->query('SELECT * FROM tracking_source_snapshots ORDER BY id DESC LIMIT 1')->fetch(),
             ]]);
+        }
+        if ($route === '/api/tracking/sources' && $method === 'POST') {
+            require_csrf();
+            $body = json_request_body();
+            send_json(['ok' => true, 'source' => tracking_add_source($pdo, (string) ($body['source_host'] ?? ''))]);
+        }
+        if (preg_match('#^/api/tracking/sources/([^/]+)(/restore)?$#D', $route, $match)) {
+            require_csrf();
+            $host = rawurldecode($match[1]);
+            if (($match[2] ?? '') === '/restore' && $method === 'POST')
+                send_json(['ok' => true, 'source' => tracking_restore_source($pdo, $host)]);
+            if (!isset($match[2]) && $method === 'DELETE') {
+                tracking_delete_source($pdo, $host);
+                send_json(['ok' => true]);
+            }
+            if (!isset($match[2]) && $method === 'PATCH') {
+                $body = json_request_body();
+                send_json(['ok' => true, 'source' => tracking_rename_source($pdo, $host, (string) ($body['source_host'] ?? ''))]);
+            }
         }
         if ($route === '/api/tracking/mode' && $method === 'PATCH') {
             require_csrf();

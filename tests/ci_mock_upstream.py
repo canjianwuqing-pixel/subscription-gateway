@@ -6,6 +6,26 @@ from urllib.parse import parse_qs, urlparse
 class MockHandler(BaseHTTPRequestHandler):
     def response(self):
         response_format = parse_qs(urlparse(self.path).query).get("format", [""])[0]
+        if response_format in ("sources6", "sources5", "sources-base64", "truncated"):
+            count = 5 if response_format == "sources5" else 6
+            plain = ("剩余流量：88GB\r\n# 公告\r\n\r\n" + "".join(
+                f"trojan://password@na{i:03d}.example.com:443?sni=sni.example.com&flag=keep#Node{i}\r\n"
+                for i in range(1, count + 1))).encode()
+            if response_format == "sources-base64":
+                plain = base64.b64encode(plain).rstrip(b"=")
+            return 200, "text/plain", plain
+        if response_format in ("sources-yaml", "empty-group"):
+            nodes = "".join(
+                f"  - {{name: Node{i}, type: trojan, server: na{i:03d}.example.com, port: 443, password: secret}}\n"
+                for i in range(1, 7))
+            refs = "Node6" if response_format == "empty-group" else "Node1, Node2, Node3, Node4, Node5, Node6, DIRECT, REJECT"
+            return 200, "application/yaml", (
+                "proxies:\n" + nodes + "proxy-groups:\n"
+                f"  - {{name: Select, type: select, proxies: [{refs}]}}\n"
+                "  - {name: Fallback, type: select, proxies: [Select, DIRECT]}\n"
+                "rules: ['MATCH,Select']\n").encode()
+        if response_format == "malformed":
+            return 200, "text/plain", b"trojan://\n"
         if response_format == "new-source":
             return 200, "text/plain", (
                 b"trojan://password@new.example.invalid:443?sni=sni-only.example.invalid#name-only.example.invalid\n"
@@ -50,7 +70,8 @@ class MockHandler(BaseHTTPRequestHandler):
         status, content_type, body = self.response()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        truncated = parse_qs(urlparse(self.path).query).get("format", [""])[0] == "truncated"
+        self.send_header("Content-Length", str(len(body) + (10 if truncated else 0)))
         if status == 302:
             self.send_header("Location", "http://redirect-target.example.invalid/subscription")
         self.end_headers()

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-const DATABASE_SCHEMA_VERSION = 4;
+const DATABASE_SCHEMA_VERSION = 5;
 const TRACKING_ALGORITHM_VERSION = 1;
 
 function env_required(string $name): string
@@ -405,6 +405,51 @@ SQL);
                 throw new RuntimeException('Database migration integrity check failed');
             }
             $pdo->exec('PRAGMA user_version=4');
+            $version = 4;
+        }
+        if ($version === 4) {
+            $pdo->exec(<<<'SQL'
+CREATE TABLE tracking_source_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_count INTEGER NOT NULL CHECK (source_count BETWEEN 0 AND 1000),
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE tracking_sources (
+    source_host TEXT PRIMARY KEY COLLATE NOCASE,
+    origin TEXT NOT NULL CHECK (origin IN ('AUTO','MANUAL')),
+    ever_seen INTEGER NOT NULL DEFAULT 0 CHECK (ever_seen IN (0,1)),
+    state TEXT NOT NULL CHECK (state IN ('CURRENT','SUSPECT','INACTIVE','UNSEEN','DELETED')),
+    first_seen_at INTEGER,
+    last_seen_at INTEGER,
+    missing_count INTEGER NOT NULL DEFAULT 0 CHECK (missing_count >= 0),
+    first_snapshot_id INTEGER,
+    last_snapshot_id INTEGER,
+    deleted_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (first_snapshot_id) REFERENCES tracking_source_snapshots(id),
+    FOREIGN KEY (last_snapshot_id) REFERENCES tracking_source_snapshots(id)
+);
+ALTER TABLE tracking_transform_events ADD COLUMN total_nodes INTEGER NOT NULL DEFAULT 0 CHECK (total_nodes >= 0);
+ALTER TABLE tracking_transform_events ADD COLUMN emitted_nodes INTEGER NOT NULL DEFAULT 0 CHECK (emitted_nodes >= 0);
+ALTER TABLE tracking_transform_events ADD COLUMN skipped_nodes INTEGER NOT NULL DEFAULT 0 CHECK (skipped_nodes >= 0);
+SQL);
+            // Legacy mappings lack observation history: conservatively seed a
+            // current baseline, without modifying any mapping or assignment.
+            $now = time();
+            $snapshot = $pdo->prepare('INSERT INTO tracking_source_snapshots (source_count,created_at) '
+                . 'SELECT COUNT(DISTINCT source_host),:now FROM tracking_entry_mappings');
+            $snapshot->execute([':now' => $now]);
+            $snapshotId = (int) $pdo->lastInsertId();
+            $sources = $pdo->prepare("INSERT INTO tracking_sources "
+                . '(source_host,origin,ever_seen,state,first_seen_at,last_seen_at,first_snapshot_id,last_snapshot_id,created_at,updated_at) '
+                . "SELECT DISTINCT LOWER(source_host),'AUTO',1,'CURRENT',:now,:now,:snapshot,:snapshot,:now,:now FROM tracking_entry_mappings");
+            $sources->execute([':now' => $now, ':snapshot' => $snapshotId]);
+            if ($pdo->query('PRAGMA foreign_key_check')->fetchAll() !== []
+                || $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok']) {
+                throw new RuntimeException('Database migration integrity check failed');
+            }
+            $pdo->exec('PRAGMA user_version=5');
         }
         $pdo->commit();
     } catch (Throwable $error) {

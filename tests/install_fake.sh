@@ -82,11 +82,11 @@ if [[ ${1:-} == --driver ]]; then
                 case $1 in
                     installation-probe) [[ -f $state/images ]];;
                     installation-check)
-                        [[ -f $state/schema && $(<"$state/schema") == 4 && -f $state/admin ]] \
+                        [[ -f $state/schema && $(<"$state/schema") == 5 && -f $state/admin ]] \
                             && inject schema && inject extensions && inject tracking;;
                     migrate)
                         inject migrate || return 1
-                        printf '4\n' > "$state/schema"
+                        printf '5\n' > "$state/schema"
                         [[ -f $RUNTIME/data/subscription-gateway.db ]] || printf 'retained tokens/ip/ua/logs/tracking\n' > "$RUNTIME/data/subscription-gateway.db";;
                     admin-status)
                         if [[ -f $state/admin ]]; then printf '1 %s\n' "$(<"$state/admin")"; else printf '0\n'; fi;;
@@ -247,8 +247,8 @@ if [[ $(uname -s) == Linux ]]; then
     expect test "$(stat -c %a "$state/sgw/runtime/install-complete")" == 600
 fi
 pass 'real first_install completes and stores a root-only nonsecret marker'
-expect test "$(<"$state/schema")" == 4
-pass 'fresh migration reaches schema v4 (real SQLite also tested in PHP/Docker)'
+expect test "$(<"$state/schema")" == 5
+pass 'fresh migration reaches schema v5 (real SQLite also tested in PHP/Docker)'
 expect grep -q 'Gateway fail-closed: upstream not configured' "$state/output"
 pass 'empty upstream is accepted as fail-closed'
 expect grep -q 'Existing certificate mode: cron/ACME/port 80 not required' "$state/output"
