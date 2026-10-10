@@ -128,15 +128,21 @@ test_case('retention removes only old access logs', function () use ($phase3Pdo)
     expect_same(0, worker_cleanup_if_due($phase3Pdo), 'Cleanup reran early');
 });
 
-test_case('password change increments auth version and invalidates old Session', function () use ($pdo): void {
+test_case('password change increments auth version and invalidates old Session', function (): void {
+    $database = app_db();
     start_admin_session();
-    $admin = authenticate_admin($pdo, 'admin_test', 'Correct-Horse-Battery-42');
+    $admin = authenticate_admin($database, 'admin_test', 'Correct-Horse-Battery-42');
     complete_login_session($admin);
     expect_true(is_authenticated());
-    $version = change_admin_password($pdo, $admin['id'], 'Correct-Horse-Battery-42', 'New-Strong-Password-123');
+    $version = change_admin_password(
+        $database,
+        $admin['id'],
+        'Correct-Horse-Battery-42',
+        'New-Strong-Password-123'
+    );
     expect_same($admin['auth_version'] + 1, $version);
     expect_true(!is_authenticated());
-    $new = authenticate_admin($pdo, 'admin_test', 'New-Strong-Password-123');
+    $new = authenticate_admin($database, 'admin_test', 'New-Strong-Password-123');
     expect_true(is_array($new));
     complete_login_session($new);
     expect_true(is_authenticated());

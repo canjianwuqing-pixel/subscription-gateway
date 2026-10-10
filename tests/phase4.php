@@ -356,9 +356,11 @@ test_case('v2 database migrates to v3 without changing core data', function () u
         . 'VALUES (:token_id, :ip, :ua, :path, 403, :decision, :created_at)');
     $log->execute([':token_id' => $tokenId, ':ip' => '198.51.100.5', ':ua' => 'MigrationClient',
         ':path' => '/api/v1/test/subscribe', ':decision' => 'TOKEN_BLOCKED', ':created_at' => time()]);
+    $old->exec('PRAGMA foreign_keys=OFF');
     foreach (['tracking_transform_events', 'tracking_entry_mappings', 'tracking_assignments', 'tracking_groups'] as $table) {
         $old->exec('DROP TABLE ' . $table);
     }
+    $old->exec('PRAGMA foreign_keys=ON');
     $old->exec("DELETE FROM settings WHERE key IN ('tracking_mode','tracking_algorithm_version')");
     $old->exec('PRAGMA user_version=2');
     initialize_database($old);
@@ -380,10 +382,12 @@ test_case('failed v2 tracking migration rolls back schema version and preserves 
     $old = open_database($path);
     initialize_database($old);
     create_admin($old, 'rollback_admin', 'Correct-Horse-Battery-42');
+    $old->exec('PRAGMA foreign_keys=OFF');
     foreach (['tracking_transform_events', 'tracking_entry_mappings', 'tracking_assignments', 'tracking_groups'] as $table) {
         $old->exec('DROP TABLE ' . $table);
     }
     $old->exec('CREATE TABLE tracking_groups (conflict TEXT)');
+    $old->exec('PRAGMA foreign_keys=ON');
     $old->exec('PRAGMA user_version=2');
     expect_exception(static fn () => initialize_database($old), PDOException::class);
     expect_same(2, (int) $old->query('PRAGMA user_version')->fetchColumn());
