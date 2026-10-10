@@ -113,7 +113,8 @@ healthy gateway || fail 'Gateway did not become healthy'
 healthy admin || fail 'Admin did not become healthy'
 compose exec -T gateway nginx -t
 compose exec -T admin nginx -t
-[[ -z $(compose port admin 8081 2>/dev/null || true) ]] \
+admin_id=$(compose ps -q admin)
+docker inspect "$admin_id" | jq -e '.[0].HostConfig.PortBindings["8081/tcp"] == null' >/dev/null \
     || fail 'internal transformer port is published to the host'
 
 gateway_id=$(compose ps -q gateway)
