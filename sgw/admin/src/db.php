@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-const DATABASE_SCHEMA_VERSION = 3;
+const DATABASE_SCHEMA_VERSION = 4;
 const TRACKING_ALGORITHM_VERSION = 1;
 
 function env_required(string $name): string
@@ -100,9 +100,9 @@ function tracking_group_key(): string
     );
 }
 
-function tracking_child_number(string $tokenHash, int $parentGroupId): int
+function tracking_child_number(string $tokenHash, int $parentGroupId, int $childCount = 3): int
 {
-    if (!preg_match('/^[0-9a-f]{64}$/D', $tokenHash) || $parentGroupId < 1) {
+    if (!preg_match('/^[0-9a-f]{64}$/D', $tokenHash) || $parentGroupId < 1 || $childCount < 2 || $childCount > 20) {
         throw new InvalidArgumentException('Invalid tracking assignment input');
     }
     $digest = hash_hmac(
@@ -115,7 +115,7 @@ function tracking_child_number(string $tokenHash, int $parentGroupId): int
     if (!is_array($number)) {
         throw new RuntimeException('Unable to calculate tracking assignment');
     }
-    return ((int) $number['value'] % 3) + 1;
+    return ((int) $number['value'] % $childCount) + 1;
 }
 
 function open_database(string $path): PDO
@@ -169,8 +169,14 @@ function initialize_database(PDO $pdo): void
         return;
     }
 
-    $pdo->beginTransaction();
+    // SQLite's table-rebuild migration requires FK enforcement disabled BEFORE
+    // the transaction. Check all relationships before commit and restore it below.
+    if ($pdo->inTransaction()) {
+        throw new RuntimeException('Database migration requires its own transaction');
+    }
+    $pdo->exec('PRAGMA foreign_keys=OFF');
     try {
+        $pdo->beginTransaction();
         if ($version === 0) {
             $pdo->exec(<<<'SQL'
 CREATE TABLE admins (
@@ -367,6 +373,38 @@ SQL);
                 ]);
             }
             $pdo->exec('PRAGMA user_version=3');
+            $version = 3;
+        }
+        if ($version === 3) {
+            $pdo->exec(<<<'SQL'
+CREATE TABLE tracking_groups_v4 (
+    id INTEGER PRIMARY KEY,
+    parent_id INTEGER,
+    child_no INTEGER NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('DRAFT', 'ACTIVE', 'ARCHIVED')),
+    split_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (parent_id) REFERENCES tracking_groups(id) ON DELETE RESTRICT,
+    UNIQUE (parent_id, child_no),
+    CHECK (
+        (parent_id IS NULL AND child_no = 0 AND path = 'root')
+        OR
+        (parent_id IS NOT NULL AND child_no >= 1)
+    )
+);
+INSERT INTO tracking_groups_v4
+    (id, parent_id, child_no, path, status, split_at, created_at, updated_at)
+SELECT id, parent_id, child_no, path, status, split_at, created_at, updated_at FROM tracking_groups;
+DROP TABLE tracking_groups;
+ALTER TABLE tracking_groups_v4 RENAME TO tracking_groups;
+SQL);
+            if ($pdo->query('PRAGMA foreign_key_check')->fetchAll() !== []
+                || $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok']) {
+                throw new RuntimeException('Database migration integrity check failed');
+            }
+            $pdo->exec('PRAGMA user_version=4');
         }
         $pdo->commit();
     } catch (Throwable $error) {
@@ -374,6 +412,8 @@ SQL);
             $pdo->rollBack();
         }
         throw $error;
+    } finally {
+        $pdo->exec('PRAGMA foreign_keys=ON');
     }
 }
 

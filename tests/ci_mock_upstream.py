@@ -28,6 +28,14 @@ class MockHandler(BaseHTTPRequestHandler):
         if response_format == "base64":
             plain = b"trojan://password@origin.example.invalid:443?sni=origin.example.invalid#CI\n"
             return 200, "text/plain", base64.b64encode(plain).rstrip(b"=")
+        if response_format in ("metadata-base64", "unknown-scheme-base64"):
+            notes = "  剩余流量：88GB  \r\n套餐到期：2026-12-31\r\n官网：https://website.example.com\r\n" \
+                "https://download.example.com\r\n# 公告\r\n\r\n提示：请使用 vless:// 格式客户端\r\n"
+            nodes = [f"{'vless' if i % 2 == 0 else 'hysteria2'}://credential@origin.example.invalid:443?sni=origin.example.invalid#Node-{i}\r\n" for i in range(41)]
+            plain = (notes + "".join(nodes)).encode()
+            if response_format == "unknown-scheme-base64":
+                plain += b"anytls://credential@origin.example.invalid:443\r\n"
+            return 200, "text/plain", base64.b64encode(plain).rstrip(b"=")
         if response_format == "unknown":
             return 200, "text/plain", b"not a supported subscription document\n"
         if response_format == "unauthorized":

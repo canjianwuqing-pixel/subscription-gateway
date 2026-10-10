@@ -160,8 +160,8 @@ test_case('empty database initialization creates core and tracking tables', func
         'tracking_entry_mappings', 'tracking_groups', 'tracking_transform_events', 'ua_rules'], $tables);
 });
 
-test_case('user_version is three and initialization is idempotent', function () use ($pdo): void {
-    expect_same(3, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
+test_case('user_version is four and initialization is idempotent', function () use ($pdo): void {
+    expect_same(4, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
     setting_set($pdo, 'idempotence_probe', 'preserved');
     initialize_database($pdo);
     expect_same('preserved', setting_get($pdo, 'idempotence_probe'));
@@ -519,6 +519,10 @@ require __DIR__ . '/phase4.php';
 require __DIR__ . '/installation.php';
 require __DIR__ . '/admin_workflow.php';
 require __DIR__ . '/mapping_json.php';
+require __DIR__ . '/subscription_metadata.php';
+require __DIR__ . '/flexible_splits.php';
+require __DIR__ . '/schema_v4.php';
+require __DIR__ . '/tracking_ui.php';
 
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";

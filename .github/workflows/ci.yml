@@ -32,6 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           while IFS= read -r -d '' file; do bash -n "$file"; done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
+          node tests/tracking_ui.mjs
       - name: Run existing PHP and simulated watcher/operations tests
         shell: bash
         run: |

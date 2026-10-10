@@ -229,7 +229,13 @@ function tracking_try_transform_uri_list(string $body, array $mapping, ?Tracking
             continue;
         }
         if (!preg_match('#^(vless|hysteria2|hy2|trojan|ss|tuic|vmess)://#i', $line, $match)) {
-            return null;
+            // Only a scheme at the first non-whitespace character can be a node.
+            // HTTP(S) and ordinary metadata remain byte-for-byte in $parts.
+            if (preg_match('#^([a-z][a-z0-9+.-]*)://#i', $line, $unknown)
+                && !in_array(strtolower($unknown[1]), ['http', 'https'], true)) {
+                throw new TrackingTransformFailure('UNKNOWN_FORMAT', 'URI', 'Unsupported proxy scheme');
+            }
+            continue;
         }
         $scheme = strtolower($match[1]);
         if ($scheme === 'vmess') {

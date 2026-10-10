@@ -144,8 +144,8 @@ test_case('Legacy off Tokens backfill hashes without changing existing assignmen
     expect_same($before, tracking_assignment_for_hash($workflowPdo, token_hash_value($workflowToken)));
     foreach ($rows as $row) expect_true($row['tracking_group_path'] !== null);
 });
-test_case('Schema stays v3 and has no plaintext Token columns', function () use ($workflowPdo, $workflowToken): void {
-    expect_same(3, (int) $workflowPdo->query('PRAGMA user_version')->fetchColumn());
+test_case('Schema v4 has no plaintext Token columns', function () use ($workflowPdo, $workflowToken): void {
+    expect_same(4, (int) $workflowPdo->query('PRAGMA user_version')->fetchColumn());
     foreach (['tokens', 'access_logs', 'tracking_assignments'] as $table) {
         $columns = array_column($workflowPdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(), 'name');
         foreach (['token', 'plaintext', 'token_plaintext'] as $plaintext) expect_true(!in_array($plaintext, $columns, true));

@@ -342,7 +342,7 @@ test_case('tracking transform events provide bounded 24 hour aggregate statistic
     expect_same(1, $stats['formats']['YAML']);
 });
 
-test_case('v2 database migrates to v3 without changing core data', function () use ($phase4Directory): void {
+test_case('v2 database migrates to v4 without changing core data', function () use ($phase4Directory): void {
     $path = $phase4Directory . DIRECTORY_SEPARATOR . 'v2.db';
     $old = open_database($path);
     initialize_database($old);
@@ -364,7 +364,7 @@ test_case('v2 database migrates to v3 without changing core data', function () u
     $old->exec("DELETE FROM settings WHERE key IN ('tracking_mode','tracking_algorithm_version')");
     $old->exec('PRAGMA user_version=2');
     initialize_database($old);
-    expect_same(3, (int) $old->query('PRAGMA user_version')->fetchColumn());
+    expect_same(4, (int) $old->query('PRAGMA user_version')->fetchColumn());
     expect_same(1, (int) $old->query('SELECT COUNT(*) FROM admins WHERE username = \'migration_admin\'')->fetchColumn());
     expect_same('BLOCKED', (string) $old->query('SELECT state FROM tokens WHERE id = ' . $tokenId)->fetchColumn());
     expect_same(1, (int) $old->query('SELECT COUNT(*) FROM ip_rules')->fetchColumn());

@@ -436,7 +436,6 @@ function admin_error_message(string $message): string
         'Configure the active parent mapping before creating a split' => '请先使用预检模式学习父组的原入口',
         'Only an active leaf group can be split' => '只能拆分已启用的叶子入口组',
         'Split parent must still be an active leaf' => '父组必须仍为已启用的叶子入口组',
-        'Split must contain exactly three draft children' => '拆分必须包含三个待配置子组',
         'This tracking group cannot have mappings' => '该入口组不能配置映射',
         'Only leaf groups can have effective mappings' => '只能配置叶子入口组的有效映射',
         'Split parent has no entry mappings' => '父组尚未识别原入口',
@@ -710,7 +709,19 @@ function handle_api(string $route, string $method): never
         }
         if (preg_match('#^/api/tracking/groups/(\d+)/split$#D', $route, $match) && $method === 'POST') {
             require_csrf();
-            send_json(['ok' => true, 'children' => tracking_create_split($pdo, (int) $match[1])]);
+            $body = json_request_body();
+            $count = validate_tracking_child_count(array_key_exists('child_count', $body) ? $body['child_count'] : 3);
+            send_json(['ok' => true, 'children' => tracking_create_split($pdo, (int) $match[1], $count)]);
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)$#D', $route, $match) && $method === 'DELETE') {
+            require_csrf();
+            tracking_delete_draft_group($pdo, (int) $match[1]);
+            send_json(['ok' => true]);
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)/split$#D', $route, $match) && $method === 'DELETE') {
+            require_csrf();
+            tracking_cancel_split($pdo, (int) $match[1]);
+            send_json(['ok' => true]);
         }
         if (preg_match('#^/api/tracking/groups/(\d+)/validate-split$#D', $route, $match) && $method === 'POST') {
             require_csrf();

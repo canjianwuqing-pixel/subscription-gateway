@@ -117,10 +117,12 @@ function tracking_descend_to_leaf(PDO $pdo, string $tokenHash, int $startGroupId
         if ($children === []) {
             return $current;
         }
-        if (count($children) !== 3 || array_map(static fn (array $row): int => (int) $row['child_no'], $children) !== [1, 2, 3]) {
+        $childCount = count($children);
+        if ($childCount < 2 || $childCount > 20
+            || array_map(static fn (array $row): int => (int) $row['child_no'], $children) !== range(1, $childCount)) {
             throw new RuntimeException('Active tracking split is incomplete');
         }
-        $childNo = tracking_child_number($tokenHash, $current);
+        $childNo = tracking_child_number($tokenHash, $current, $childCount);
         $current = (int) $children[$childNo - 1]['id'];
     }
 }
@@ -152,7 +154,9 @@ SQL);
         }
         try {
             $leaf = tracking_descend_to_leaf($pdo, $tokenHash, (int) $stored);
-        } catch (Throwable) {
+        } catch (DomainException) {
+            // Missing groups can be repaired; corrupt ACTIVE topology must fail,
+            // never silently choose another branch and reshuffle the assignment.
             $root = (int) $pdo->query("SELECT id FROM tracking_groups WHERE parent_id IS NULL AND status = 'ACTIVE'")->fetchColumn();
             $leaf = tracking_descend_to_leaf($pdo, $tokenHash, $root);
         }
@@ -314,9 +318,10 @@ SQL);
 }
 
 /** @return list<array<string, mixed>> */
-function tracking_create_split(PDO $pdo, int $parentId): array
+function tracking_create_split(PDO $pdo, int $parentId, int $childCount = 3): array
 {
-    return write_transaction($pdo, static function () use ($pdo, $parentId): array {
+    validate_tracking_child_count($childCount);
+    return write_transaction($pdo, static function () use ($pdo, $parentId, $childCount): array {
         $parent = tracking_group($pdo, $parentId);
         if ($parent['path'] === 'root' || !tracking_group_is_active_leaf($pdo, $parentId)) {
             throw new DomainException('Only an active leaf group can be split');
@@ -342,7 +347,7 @@ SQL);
             throw new DomainException('Configure the active parent mapping before creating a split');
         }
         $children = [];
-        for ($childNo = 1; $childNo <= 3; $childNo++) {
+        for ($childNo = 1; $childNo <= $childCount; $childNo++) {
             $path = $parent['path'] . '.' . $childNo;
             $insert->execute([':parent_id' => $parentId, ':child_no' => $childNo, ':path' => $path,
                 ':created_at' => $now, ':updated_at' => $now]);
@@ -357,6 +362,80 @@ SQL);
     });
 }
 
+function validate_tracking_child_count(mixed $count): int
+{
+    if (!is_int($count) || $count < 2 || $count > 20) {
+        throw new InvalidArgumentException('子组数量必须为2至20的整数');
+    }
+    return $count;
+}
+
+/** Reject unsafe pending trees before deleting or renumbering any row. */
+function tracking_assert_draft_removable(PDO $pdo, array $group): void
+{
+    if ($group['status'] !== 'DRAFT' || $group['parent_id'] === null) {
+        throw new DomainException('仅允许删除待配置子组，已启用或归档组不可删除');
+    }
+    $statement = $pdo->prepare('SELECT '
+        . '(SELECT COUNT(*) FROM tracking_assignments WHERE group_id = :id) + '
+        . '(SELECT COUNT(*) FROM tracking_groups WHERE parent_id = :id)');
+    $statement->execute([':id' => (int) $group['id']]);
+    if ((int) $statement->fetchColumn() !== 0) {
+        throw new DomainException('带有Token分配或子组的待配置组不可删除');
+    }
+}
+
+/** @return list<array<string, mixed>> */
+function tracking_pending_split(PDO $pdo, int $parentId): array
+{
+    $parent = tracking_group($pdo, $parentId);
+    if ($parent['path'] === 'root' || !tracking_group_is_active_leaf($pdo, $parentId)) {
+        throw new DomainException('仅允许取消ACTIVE叶子组下的待配置拆分');
+    }
+    $children = tracking_children($pdo, $parentId, 'DRAFT');
+    $statement = $pdo->prepare('SELECT COUNT(*) FROM tracking_groups WHERE parent_id = :id');
+    $statement->execute([':id' => $parentId]);
+    if ($children === [] || (int) $statement->fetchColumn() !== count($children)) {
+        throw new DomainException('仅允许删除待配置拆分，已激活拆分数量不可改变');
+    }
+    foreach ($children as $child) tracking_assert_draft_removable($pdo, $child);
+    return $children;
+}
+
+function tracking_delete_draft_group(PDO $pdo, int $groupId): void
+{
+    write_transaction($pdo, static function () use ($pdo, $groupId): void {
+        $group = tracking_group($pdo, $groupId);
+        tracking_assert_draft_removable($pdo, $group);
+        $parentId = (int) $group['parent_id'];
+        $children = tracking_pending_split($pdo, $parentId);
+        $delete = $pdo->prepare("DELETE FROM tracking_groups WHERE id = :id AND status = 'DRAFT'");
+        $delete->execute([':id' => $groupId]);
+        $remaining = array_values(array_filter($children, static fn ($child) => (int) $child['id'] !== $groupId));
+        $parent = tracking_group($pdo, $parentId);
+        // Two phases avoid UNIQUE(parent_id,child_no) and UNIQUE(path) collisions.
+        $offset = max(array_map(static fn ($child) => (int) $child['child_no'], $children)) + 20;
+        $update = $pdo->prepare('UPDATE tracking_groups SET child_no = :no, path = :path, updated_at = :now WHERE id = :id');
+        $now = time();
+        foreach ([$offset, 0] as $base) {
+            foreach ($remaining as $index => $child) {
+                $number = $base + $index + 1;
+                $update->execute([':no' => $number, ':path' => $parent['path'] . '.' . $number,
+                    ':now' => $now, ':id' => (int) $child['id']]);
+            }
+        }
+    });
+}
+
+function tracking_cancel_split(PDO $pdo, int $parentId): void
+{
+    write_transaction($pdo, static function () use ($pdo, $parentId): void {
+        tracking_pending_split($pdo, $parentId);
+        $delete = $pdo->prepare("DELETE FROM tracking_groups WHERE parent_id = :id AND status = 'DRAFT'");
+        $delete->execute([':id' => $parentId]);
+    });
+}
+
 /** @return list<array<string, mixed>> */
 function tracking_validate_split(PDO $pdo, int $parentId): array
 {
@@ -365,8 +444,10 @@ function tracking_validate_split(PDO $pdo, int $parentId): array
         throw new DomainException('Split parent must still be an active leaf');
     }
     $children = tracking_children($pdo, $parentId, 'DRAFT');
-    if (count($children) !== 3 || array_map(static fn (array $row): int => (int) $row['child_no'], $children) !== [1, 2, 3]) {
-        throw new DomainException('Split must contain exactly three draft children');
+    $childCount = count($children);
+    if ($childCount < 2 || $childCount > 20
+        || array_map(static fn (array $row): int => (int) $row['child_no'], $children) !== range(1, $childCount)) {
+        throw new DomainException('拆分必须包含2至20个连续编号的待配置子组');
     }
     $expectedSources = array_column(tracking_group_mappings($pdo, $parentId), 'source_host');
     sort($expectedSources, SORT_STRING);
@@ -427,7 +508,7 @@ function tracking_activate_split(PDO $pdo, int $parentId): int
         $moved = 0;
         foreach ($assignments as $assignment) {
             $tokenHash = (string) $assignment['token_hash'];
-            $childNo = tracking_child_number($tokenHash, $parentId);
+            $childNo = tracking_child_number($tokenHash, $parentId, count($children));
             $update->execute([':group_id' => $byNumber[$childNo], ':version' => TRACKING_ALGORITHM_VERSION,
                 ':updated_at' => $now, ':token_hash' => $tokenHash, ':parent_id' => $parentId]);
             $moved += $update->rowCount();
@@ -493,6 +574,7 @@ function tracking_list_groups(PDO $pdo): array
 SELECT g.id, g.parent_id, g.child_no, g.path, g.status, g.split_at, g.created_at, g.updated_at,
        COUNT(DISTINCT a.token_hash) AS token_count,
        COUNT(DISTINCT m.id) AS mapping_count,
+       COUNT(DISTINCT CASE WHEN m.target_host IS NOT NULL AND TRIM(m.target_host) != '' THEN m.id END) AS mapping_filled_count,
        EXISTS(SELECT 1 FROM tracking_groups c WHERE c.parent_id = g.id AND c.status = 'ACTIVE') AS has_active_children,
        EXISTS(SELECT 1 FROM tracking_groups c WHERE c.parent_id = g.id AND c.status = 'DRAFT') AS has_draft_children
 FROM tracking_groups g
@@ -503,7 +585,7 @@ GROUP BY g.id
 ORDER BY g.path
 SQL)->fetchAll();
     foreach ($rows as &$row) {
-        foreach (['id', 'child_no', 'token_count', 'mapping_count', 'has_active_children', 'has_draft_children'] as $key) {
+        foreach (['id', 'child_no', 'token_count', 'mapping_count', 'mapping_filled_count', 'has_active_children', 'has_draft_children'] as $key) {
             $row[$key] = (int) $row[$key];
         }
         $row['parent_id'] = (int) $row['parent_id'];
@@ -513,6 +595,7 @@ SQL)->fetchAll();
         $row['mappings'] = tracking_group_mappings($pdo, (int) $row['id']);
     }
     unset($row);
+    usort($rows, static fn ($left, $right) => strnatcmp($left['path'], $right['path']));
     return $rows;
 }
 

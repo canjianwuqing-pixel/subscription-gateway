@@ -373,8 +373,67 @@ for mapping_case in tampered missing extra duplicate string integer null empty s
         || fail 'mapping validation error response is invalid'
     db assert-mapping "$mapping_group" origin.example.invalid 2001:db8::1
 done
-unset admin_csrf mapping_rows mapping_target mapping_case mapping_group
 printf 'PASS: authenticated mapping JSON PUT, IPv4/domain/IPv6 SQLite saves and unchanged safety validation\n'
+
+# Dynamic split/delete/cancel use real authenticated HTTP and never move assignments.
+assignment_before=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php assignment-digest)
+for child_count in 1 21 3.5 '"4"' null true; do
+    jq -n --argjson count "$child_count" '{child_count:$count}' > "$temporary/split.json"
+    admin_request "api/tracking/groups/$mapping_group/split" --request POST \
+        --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" \
+        --data-binary "@$temporary/split.json"
+    [[ $admin_code == 422 ]] || fail 'invalid child_count was accepted by the HTTP API'
+done
+jq -n '{child_count:4}' > "$temporary/split.json"
+admin_request "api/tracking/groups/$mapping_group/split" --request POST \
+    --header 'Content-Type: application/json' --data-binary "@$temporary/split.json"
+[[ $admin_code == 403 ]] || fail 'split creation accepted missing CSRF'
+admin_request "api/tracking/groups/$mapping_group/split" --request POST \
+    --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" \
+    --data-binary "@$temporary/split.json"
+[[ $admin_code == 200 ]] || fail 'dynamic four-child HTTP split creation failed'
+jq -e '.children | length == 4 and all(.status == "DRAFT")' "$temporary/admin-response" >/dev/null \
+    || fail 'HTTP split did not return four DRAFT children'
+draft_ids=$(jq -r '.children[].id' "$temporary/admin-response")
+deleted_draft=$(jq -er '.children[1].id' "$temporary/admin-response")
+for draft_id in $draft_ids; do
+    jq -n --arg target "child-$draft_id.example.com" \
+        '{mappings:[{source_host:"origin.example.invalid",target_host:$target}]}' > "$temporary/mapping.json"
+    admin_request "api/tracking/groups/$draft_id/mappings" --request PUT \
+        --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" \
+        --data-binary "@$temporary/mapping.json"
+    [[ $admin_code == 200 ]] || fail 'DRAFT HTTP target configuration failed'
+done
+primary_cookie=$admin_cookie
+admin_cookie=$temporary/anonymous-split-cookie
+admin_request "api/tracking/groups/$deleted_draft" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 401 ]] || fail 'anonymous DRAFT deletion was not denied'
+admin_cookie=$primary_cookie
+admin_request "api/tracking/groups/$deleted_draft" --request DELETE
+[[ $admin_code == 403 ]] || fail 'DRAFT deletion accepted missing CSRF'
+admin_request "api/tracking/groups/$deleted_draft" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 200 ]] || fail 'DRAFT HTTP deletion failed'
+admin_request api/tracking
+jq -e --argjson parent "$mapping_group" \
+    '[.tracking.groups[] | select(.parent_id == $parent and .status == "DRAFT")] | length == 3 and [.[].child_no] == [1,2,3]' \
+    "$temporary/admin-response" >/dev/null || fail 'DRAFT children were not renumbered continuously'
+for draft_id in $draft_ids; do
+    [[ $draft_id == "$deleted_draft" ]] && continue
+    db assert-mapping "$draft_id" origin.example.invalid "child-$draft_id.example.com"
+done
+admin_request "api/tracking/groups/$mapping_group/split" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 200 ]] || fail 'pending HTTP split cancellation failed'
+admin_request api/tracking
+jq -e --argjson parent "$mapping_group" \
+    'all(.tracking.groups[]; .parent_id != $parent) and any(.tracking.groups[]; .id == $parent and .has_draft_children == 0 and .has_active_children == 0)' \
+    "$temporary/admin-response" >/dev/null || fail 'cancelled children remain in the tree'
+admin_request "api/tracking/groups/$mapping_group" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 409 ]] || fail 'ACTIVE HTTP group deletion was not denied'
+db assert-mapping "$mapping_group" origin.example.invalid 2001:db8::1
+[[ $assignment_before == "$(compose exec -T admin su-exec www-data php /tmp/ci_db.php assignment-digest)" ]] \
+    || fail 'pending split lifecycle moved Token assignments'
+unset admin_csrf mapping_rows mapping_target mapping_case mapping_group child_count draft_ids draft_id deleted_draft assignment_before
+printf 'PASS: authenticated dynamic split creation, DRAFT deletion/renumber/cancel, CSRF and zero assignment movement\n'
 
 db tracking-configure "$token" preflight
 publish
@@ -431,6 +490,29 @@ decoded = base64.b64decode(payload, validate=True).decode()
 assert f"@{sys.argv[2]}:443" in decoded
 assert "sni=origin.example.invalid" in decoded
 PY
+
+request "$path?token=$token&format=metadata-base64"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail '41-node metadata Base64 subscription failed'
+python3 - "$temporary/response" "$tracking_target" <<'PY'
+import base64
+import pathlib
+import sys
+
+payload = pathlib.Path(sys.argv[1]).read_bytes().strip()
+decoded = base64.b64decode(payload + b"=" * (-len(payload) % 4), validate=True)
+notes = "  剩余流量：88GB  \r\n套餐到期：2026-12-31\r\n官网：https://website.example.com\r\n" \
+    "https://download.example.com\r\n# 公告\r\n\r\n提示：请使用 vless:// 格式客户端\r\n"
+nodes = [f"{'vless' if i % 2 == 0 else 'hysteria2'}://credential@{sys.argv[2]}:443?sni=origin.example.invalid#Node-{i}\r\n" for i in range(41)]
+assert decoded == (notes + "".join(nodes)).encode()
+assert not payload.endswith(b"=")
+PY
+admin_request api/tracking
+[[ $admin_code == 200 ]] || fail 'source exclusion check could not read authenticated tracking API'
+if jq -e '.tracking.groups[].mappings[] | select(.source_host == "website.example.com" or .source_host == "download.example.com")' \
+    "$temporary/admin-response" >/dev/null; then fail 'metadata website was learned as a source'; fi
+request "$path?token=$token&format=unknown-scheme-base64"
+[[ $request_exit == 0 && $request_code == 502 ]] || fail 'unknown anytls Base64 node did not fail closed'
+printf 'PASS: real Gateway Base64 41-node mixed metadata, byte preservation, source exclusion and anytls fail-closed\n'
 
 request "$path?token=$token&format=unknown"
 [[ $request_exit == 0 && $request_code == 502 ]] || fail 'enforced unknown format did not fail closed'

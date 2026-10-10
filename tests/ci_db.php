@@ -109,6 +109,9 @@ switch ($command) {
             }
         }
         break;
+    case 'assignment-digest':
+        echo hash('sha256', json_encode($pdo->query('SELECT * FROM tracking_assignments ORDER BY token_hash')->fetchAll(), JSON_THROW_ON_ERROR)), "\n";
+        exit(0);
     case 'assert-mapping':
         $statement = $pdo->prepare('SELECT source_host, target_host FROM tracking_entry_mappings WHERE group_id = :id');
         $statement->execute([':id' => (int) ($argv[2] ?? 0)]);
