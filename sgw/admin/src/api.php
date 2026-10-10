@@ -346,6 +346,25 @@ function decode_json_object(string $raw): array
     return (array) $body;
 }
 
+/** Normalize mapping rows only at the tracking API boundary.
+ * @param list<mixed> $mappings
+ * @return list<array<string, mixed>>
+ */
+function normalize_tracking_mapping_rows(array $mappings): array
+{
+    $normalized = [];
+    foreach ($mappings as $row) {
+        if ($row instanceof stdClass) {
+            $row = (array) $row;
+        }
+        if (!is_array($row)) {
+            throw new InvalidArgumentException('Invalid entry mapping');
+        }
+        $normalized[] = $row;
+    }
+    return $normalized;
+}
+
 /** @param array<string, mixed> $body */
 function validate_rate_request_body(array $body): array
 {
@@ -686,7 +705,7 @@ function handle_api(string $route, string $method): never
             if (!is_array($mappings) || !array_is_list($mappings)) {
                 throw new InvalidArgumentException('mappings must be a JSON array');
             }
-            tracking_save_group_targets($pdo, (int) $match[1], $mappings);
+            tracking_save_group_targets($pdo, (int) $match[1], normalize_tracking_mapping_rows($mappings));
             send_json(['ok' => true, 'mappings' => tracking_group_mappings($pdo, (int) $match[1])]);
         }
         if (preg_match('#^/api/tracking/groups/(\d+)/split$#D', $route, $match) && $method === 'POST') {

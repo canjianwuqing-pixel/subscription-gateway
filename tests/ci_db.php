@@ -109,6 +109,14 @@ switch ($command) {
             }
         }
         break;
+    case 'assert-mapping':
+        $statement = $pdo->prepare('SELECT source_host, target_host FROM tracking_entry_mappings WHERE group_id = :id');
+        $statement->execute([':id' => (int) ($argv[2] ?? 0)]);
+        if ($statement->fetchAll() !== [['source_host' => (string) ($argv[3] ?? ''),
+            'target_host' => (string) ($argv[4] ?? '')]]) {
+            throw new RuntimeException('HTTP mapping save did not persist the expected SQLite row');
+        }
+        break;
     case 'assert-ingested':
         $token = (string) ($argv[2] ?? '');
         validate_token_format($token);

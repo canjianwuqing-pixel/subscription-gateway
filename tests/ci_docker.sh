@@ -307,7 +307,7 @@ grep -Fq 'color-scheme:light' "$temporary/admin-response" || fail 'dashboard is 
 if grep -Fq "$token" "$temporary/admin-response" || grep -Fq "$manual_token" "$temporary/admin-response"; then
     fail 'dashboard statically embedded full Tokens'
 fi
-unset admin_password admin_path manual_token admin_csrf other_csrf
+unset admin_password admin_path manual_token other_csrf
 printf 'PASS: authenticated Admin APIs, exact Token logs, off assignments, six-byte password and session invalidation\n'
 
 # Start with no configured mappings: preflight must learn and return original bytes.
@@ -318,6 +318,63 @@ request "$path?token=$token&format=uri"
 grep -Fq '@origin.example.invalid:443' "$temporary/response" \
     || fail 'empty-mapping preflight changed the original body'
 db assert-learned origin.example.invalid
+
+# Browser-shaped JSON must pass the authenticated PUT boundary and persist to SQLite.
+admin_request api/tracking
+[[ $admin_code == 200 ]] || fail 'tracking API could not list learned sources'
+mapping_group=$(jq -er '[.tracking.groups[] | select(.status == "ACTIVE" and .has_active_children == 0)][0].id' \
+    "$temporary/admin-response")
+mapping_put() {
+    admin_request "api/tracking/groups/$mapping_group/mappings" --request PUT \
+        --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" \
+        --data-binary "@$temporary/mapping.json"
+}
+for mapping_target in 43.198.74.153 3.1.51.25 entry-a.example.com 2001:db8::1; do
+    jq -n --arg target "$mapping_target" \
+        '{mappings:[{source_host:"origin.example.invalid",target_host:$target}]}' > "$temporary/mapping.json"
+    mapping_put
+    [[ $admin_code == 200 ]] || fail 'browser JSON mapping save failed'
+    jq -e --arg target "$mapping_target" \
+        '.ok == true and (.mappings | length == 1 and .[0].source_host == "origin.example.invalid" and .[0].target_host == $target)' \
+        "$temporary/admin-response" >/dev/null || fail 'mapping PUT response differs from saved targets'
+    db assert-mapping "$mapping_group" origin.example.invalid "$mapping_target"
+done
+for mapping_case in tampered missing extra duplicate string integer null empty scheme port path space query at backslash object; do
+    case $mapping_case in
+        tampered) mapping_rows='[{"source_host":"evil.example.com","target_host":"entry-a.example.com"}]' ;;
+        missing) mapping_rows='[]' ;;
+        extra) mapping_rows='[{"source_host":"origin.example.invalid","target_host":"entry-a.example.com"},{"source_host":"extra.example.com","target_host":"entry-a.example.com"}]' ;;
+        duplicate) mapping_rows='[{"source_host":"origin.example.invalid","target_host":"entry-a.example.com"},{"source_host":"origin.example.invalid","target_host":"entry-a.example.com"}]' ;;
+        string) mapping_rows='["invalid"]' ;;
+        integer) mapping_rows='[7]' ;;
+        null) mapping_rows='[null]' ;;
+        object) mapping_rows='{}' ;;
+        *)
+            case $mapping_case in
+                empty) mapping_target='' ;;
+                scheme) mapping_target=https://example.com ;;
+                port) mapping_target=example.com:443 ;;
+                path) mapping_target=/path ;;
+                space) mapping_target='bad host' ;;
+                query) mapping_target='example.com?query=1' ;;
+                at) mapping_target=user@example.com ;;
+                backslash) mapping_target='example.com\path' ;;
+            esac
+            mapping_rows=$(jq -n --arg target "$mapping_target" \
+                '[{source_host:"origin.example.invalid",target_host:$target}]') ;;
+    esac
+    jq -n --argjson rows "$mapping_rows" '{mappings:$rows}' > "$temporary/mapping.json"
+    mapping_put
+    case $mapping_case in
+        tampered|missing|extra|duplicate) [[ $admin_code == 409 ]] || fail 'source set change was not rejected' ;;
+        *) [[ $admin_code == 422 ]] || fail 'invalid mapping row or target was not rejected' ;;
+    esac
+    jq -e '.ok == false and (.error | type == "string")' "$temporary/admin-response" >/dev/null \
+        || fail 'mapping validation error response is invalid'
+    db assert-mapping "$mapping_group" origin.example.invalid 2001:db8::1
+done
+unset admin_csrf mapping_rows mapping_target mapping_case mapping_group
+printf 'PASS: authenticated mapping JSON PUT, IPv4/domain/IPv6 SQLite saves and unchanged safety validation\n'
 
 db tracking-configure "$token" preflight
 publish
