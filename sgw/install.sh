@@ -51,11 +51,14 @@ validate_install_environment() {
 installation_cleanup() {
     local status=$1
     trap - EXIT
-    rm -f -- "$ENV_FILE.tmp"
-    if [[ ! -L $RUNTIME ]]; then
-        rm -f -- "$RUNTIME/install-state.tmp" "$RUNTIME/install-complete.tmp"
+    # A process rejected by flock must not delete another installer's files.
+    if [[ ${INSTALL_LOCK_HELD:-no} == yes ]]; then
+        rm -f -- "$ENV_FILE.tmp"
+        if [[ ! -L $RUNTIME ]]; then
+            rm -f -- "$RUNTIME/install-state.tmp" "$RUNTIME/install-complete.tmp"
+        fi
     fi
-    if (( status != 0 )); then
+    if (( status != 0 )) && [[ ${INSTALL_LOCK_HELD:-no} == yes ]]; then
         if [[ ! -L $RUNTIME && ! -L $RUNTIME/ssl && ! -L $RUNTIME/ssl/staging \
             && -n ${INSTALL_DOMAIN:-} ]] && ! certificate_verify \
             "$RUNTIME/ssl/staging/fullchain.pem" "$RUNTIME/ssl/staging/privkey.pem" "$INSTALL_DOMAIN"; then
@@ -64,6 +67,8 @@ installation_cleanup() {
         if [[ ! -L $RUNTIME && ! -L $RUNTIME/ssl ]]; then
             rm -f -- "$RUNTIME/ssl/deploy-hook.sh.tmp"
         fi
+    fi
+    if (( status != 0 )); then
         warning 'Installation incomplete. Fix the reported problem and run ./setup.sh again.'
     fi
 }

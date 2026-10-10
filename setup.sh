@@ -51,6 +51,7 @@ first_install() {
     require_root
     [[ ! -L $ENV_FILE ]] || die '.env must not be a symbolic link'
     INSTALL_DOMAIN=''
+    INSTALL_LOCK_HELD=no
     trap 'installation_cleanup $?' EXIT
     trap 'exit 130' INT TERM HUP
     check_os_arch_disk
@@ -99,6 +100,7 @@ first_install() {
     command -v flock >/dev/null || die 'flock is required'
     exec 8> "$RUNTIME/install.lock"
     flock -n 8 || die 'Another installation is running'
+    INSTALL_LOCK_HELD=yes
     [[ ! -e $RUNTIME/install-complete ]] || private_root_file "$RUNTIME/install-complete" \
         || die 'Unsafe install-complete marker'
     if install_completed; then completed=yes; fi

@@ -112,6 +112,10 @@ if [[ ${1:-} == --driver ]]; then
         ops-http) make_runtime; acquire_certificate http-01 gateway.test;;
         ops-existing) make_runtime; acquire_certificate existing gateway.test; register_acme_hook existing gateway.test;;
         ops-renewal) make_runtime; ensure_deploy_hook >/dev/null; acme_renewal_ready gateway.test;;
+        ops-cleanup)
+            INSTALL_DOMAIN=gateway.test INSTALL_LOCK_HELD=no
+            [[ ! -f $state/lock-held ]] || INSTALL_LOCK_HELD=yes
+            installation_cleanup 1;;
         *) exit 1;;
     esac
     exit
@@ -140,7 +144,7 @@ new_state() {
     cp "$test_root/cert.pem" "$state/cert.pem"
     cp "$test_root/key.pem" "$state/key.pem"
     cp "$test_root/mock" "$state/bin/mock"
-    for name in docker curl git apt-get service systemctl crontab cron dpkg-query ss ip socat getent; do
+    for name in docker curl git apt-get service systemctl crontab cron dpkg-query ss ip socat getent update-rc.d; do
         cp "$test_root/mock" "$state/bin/$name"
     done
     chmod 0755 "$state/bin/"*
@@ -207,7 +211,7 @@ case $name in
             start) touch "$s/daemon";;
         esac;;
     crontab) [[ $1 != -l ]] || printf '%s/acme/acme.sh --cron --home %s/acme\n' "$s" "$s";;
-    cron|socat) :;;
+    cron|socat|update-rc.d) :;;
     ss)
         if [[ -f $s/conflict && ${*: -1} == *":$(<"$s/conflict") )" ]]; then echo 'LISTEN external-process'; fi
         if [[ -f $s/port80 && ${*: -1} == *':80 )' ]]; then echo 'LISTEN port80'; fi;;
@@ -464,5 +468,21 @@ if grep -q synthetic-private-credential "$state/output"; then fail 'ACME metadat
 touch "$state/bad-hook"
 if run ops-renewal; then fail 'missing real renewal reload command ignored'; fi
 pass 'actual renewal readiness validates metadata/hook without leaking DNS credentials'
+new_state cleanup-lock
+mkdir -p "$state/sgw/runtime/ssl/staging"
+touch "$state/sgw/.env.tmp" "$state/sgw/runtime/install-state.tmp"
+printf 'invalid\n' > "$state/sgw/runtime/ssl/staging/fullchain.pem"
+printf 'invalid\n' > "$state/sgw/runtime/ssl/staging/privkey.pem"
+run ops-cleanup
+expect test -f "$state/sgw/.env.tmp"
+expect test -f "$state/sgw/runtime/install-state.tmp"
+pass 'failed concurrent install without the lock cannot remove another installer temporary files'
+touch "$state/lock-held" "$state/sgw/.env"
+run ops-cleanup
+expect test ! -f "$state/sgw/.env.tmp"
+expect test ! -f "$state/sgw/runtime/install-state.tmp"
+expect test ! -f "$state/sgw/runtime/ssl/staging/fullchain.pem"
+expect test -f "$state/sgw/.env"
+pass 'lock-owning failure cleans temporary/invalid staging but preserves durable environment'
 
 printf 'PASS: %d installer scenarios (no real ACME, package installation or Docker download)\n' "$passed"
