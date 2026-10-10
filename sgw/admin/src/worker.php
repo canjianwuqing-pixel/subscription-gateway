@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/rules.php';
+require_once __DIR__ . '/tracking.php';
 
 function event_log_files(string $path): array
 {
@@ -46,6 +46,7 @@ SQL);
             $lookup = $pdo->prepare('SELECT id FROM tokens WHERE token_hash = :hash');
             $lookup->execute([':hash' => $hash]);
             $id = (int) $lookup->fetchColumn();
+            tracking_assignment_for_hash($pdo, $hash);
             $update = $pdo->prepare(<<<'SQL'
 UPDATE tokens SET
     first_seen = MIN(COALESCE(first_seen, :first), :first),

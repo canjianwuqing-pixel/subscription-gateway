@@ -372,6 +372,76 @@ function send_saved_publish_result(array $payload, array $publish): never
     send_json($payload + ['saved' => true, 'publish' => $publish], $publish['applied'] === true ? 200 : 202);
 }
 
+/** Translate presentation only: HTTP status, database enums and validation stay unchanged. */
+function admin_error_message(string $message): string
+{
+    if (preg_match('/[\x{3400}-\x{9fff}]/u', $message)) return $message;
+    $messages = [
+        'Authentication required' => '请先登录后台',
+        'Invalid username or password' => '管理员账号或密码不正确',
+        'Too many login attempts' => '登录尝试过多，请稍后重试',
+        'CSRF validation failed' => '安全验证已失效，请刷新页面后重试',
+        'Origin validation failed' => '请求来源验证失败',
+        'Not found' => '未找到对应页面或接口',
+        'Token not found' => '未找到该 Token',
+        'Invalid request body' => '请求内容不正确或过长',
+        'Invalid JSON' => '请求内容不是有效的 JSON',
+        'JSON object required' => '请求内容必须为 JSON 对象',
+        'Token must be 32 lowercase hexadecimal characters' => 'Token 必须为32位小写十六进制字符',
+        'Invalid token state' => 'Token 状态不正确',
+        'TEMP_BLOCKED requires a future expires_at' => '临时封禁到期时间必须晚于当前时间',
+        'Rule note is invalid' => '备注不正确或过长',
+        'Only IPv4 and IPv4 CIDR are supported' => '仅支持 IPv4 地址或 IPv4 网段',
+        'Invalid IPv4 address' => 'IPv4 地址不正确',
+        'IPv4 CIDR prefix must be between 0 and 32' => 'IPv4 网段前缀长度必须为0至32',
+        'UA pattern must contain 1-256 bytes' => 'UA 匹配内容长度必须为1至256字节',
+        'UA pattern contains control characters' => 'UA 匹配内容不能包含控制字符',
+        'Invalid IP rule action' => 'IP 规则类型不正确',
+        'Invalid UA rule action' => 'UA 规则类型不正确',
+        'Invalid time window' => '时间范围不正确',
+        'Invalid status filter' => 'HTTP 状态筛选值不正确',
+        'Invalid tracking group filter' => '入口组筛选值不正确',
+        'Filter is too long' => '筛选内容过长',
+        'log_retention_days must be 1-3650' => '日志保留天数必须为1至3650',
+        'Tracking group not found' => '未找到入口组',
+        'Tracking mapping is incomplete' => '入口映射不完整，请补齐目标入口',
+        'Entry host is invalid' => '入口地址不正确',
+        'Entry IP address is invalid' => '入口 IP 地址不正确',
+        'Entry host must be a DNS hostname or IP address' => '入口必须为域名或 IP，不能包含协议、端口或路径',
+        'Active leaf mappings require a target host' => '已启用的入口组必须填写全部目标入口',
+        'Duplicate source host in tracking mapping' => '原入口不能重复',
+        'All active leaves must cover the same source hosts' => '所有已启用入口组必须覆盖相同的原入口',
+        'Every draft entry mapping requires a target host' => '请填写所有子组的目标入口',
+        'Draft children must cover the parent source hosts' => '子组必须覆盖父组的全部原入口',
+        'Tracking group already has a split' => '该入口组已创建子组',
+        'Configure the active parent mapping before creating a split' => '请先使用预检模式学习父组的原入口',
+        'Only an active leaf group can be split' => '只能拆分已启用的叶子入口组',
+        'Split parent must still be an active leaf' => '父组必须仍为已启用的叶子入口组',
+        'Split must contain exactly three draft children' => '拆分必须包含三个待配置子组',
+        'This tracking group cannot have mappings' => '该入口组不能配置映射',
+        'Only leaf groups can have effective mappings' => '只能配置叶子入口组的有效映射',
+        'Split parent has no entry mappings' => '父组尚未识别原入口',
+        'Every draft child requires entry mappings' => '每个待配置子组都需要入口映射',
+        'No active tracking leaves exist' => '没有可用的入口组',
+        'mappings must be a JSON array' => '入口映射必须为列表',
+        'Too many entry mappings' => '入口映射不能超过1000条',
+        'Invalid entry mapping' => '入口映射格式不正确',
+        'Unsupported subscribe_path_template' => 'Token 路径模板不正确，请保留 {token} 占位符或留空',
+        'Invalid token_query_key' => 'Token GET 参数名不正确，请只填写名称，例如 token',
+        'upstream_url must be an HTTP(S) origin without path, query or credentials' => '上游地址必须为 HTTP(S) 域名和可选端口，不能包含路径、参数或账号',
+        'upstream_url host is invalid' => '上游域名不正确',
+        'upstream_url port is invalid' => '上游端口不正确',
+        'Invalid rate settings' => '限速参数不正确',
+        'rate_enabled must be boolean' => '限速开关不正确',
+    ];
+    if (isset($messages[$message])) return $messages[$message];
+    if (str_starts_with($message, 'IP rule conflicts with ')) return 'IP 规则与现有规则冲突';
+    if (str_starts_with($message, 'UA rule conflicts with ')) return 'UA 规则与现有规则冲突';
+    if (str_starts_with($message, 'rate_per_minute must be between ')) return '每分钟请求数超出允许范围';
+    if (str_starts_with($message, 'rate_burst must be between ')) return '突发请求余量超出允许范围';
+    return '参数不正确或操作条件不满足，请检查填写内容和入口组状态';
+}
+
 function handle_api(string $route, string $method): never
 {
     try {
@@ -472,6 +542,7 @@ function handle_api(string $route, string $method): never
                     $expiresAt,
                     (string) ($body['note'] ?? '')
                 );
+                tracking_assignment_for_hash($pdo, token_hash_value((string) $body['token']));
                 bump_config_version($pdo);
                 return $id;
             });
@@ -615,7 +686,7 @@ function handle_api(string $route, string $method): never
             if (!is_array($mappings) || !array_is_list($mappings)) {
                 throw new InvalidArgumentException('mappings must be a JSON array');
             }
-            tracking_save_group_mappings($pdo, (int) $match[1], $mappings);
+            tracking_save_group_targets($pdo, (int) $match[1], $mappings);
             send_json(['ok' => true, 'mappings' => tracking_group_mappings($pdo, (int) $match[1])]);
         }
         if (preg_match('#^/api/tracking/groups/(\d+)/split$#D', $route, $match) && $method === 'POST') {
@@ -649,13 +720,13 @@ function handle_api(string $route, string $method): never
 
         throw new HttpError(404, 'Not found');
     } catch (HttpError $error) {
-        send_json(['ok' => false, 'error' => $error->getMessage()], $error->status);
+        send_json(['ok' => false, 'error' => admin_error_message($error->getMessage())], $error->status);
     } catch (DomainException $error) {
-        send_json(['ok' => false, 'error' => $error->getMessage()], 409);
+        send_json(['ok' => false, 'error' => admin_error_message($error->getMessage())], 409);
     } catch (InvalidArgumentException $error) {
-        send_json(['ok' => false, 'error' => $error->getMessage()], 422);
+        send_json(['ok' => false, 'error' => admin_error_message($error->getMessage())], 422);
     } catch (Throwable $error) {
         error_log('Admin API failure: ' . $error::class);
-        send_json(['ok' => false, 'error' => 'Internal server error'], 500);
+        send_json(['ok' => false, 'error' => '后台服务异常，请稍后重试或检查服务日志'], 500);
     }
 }

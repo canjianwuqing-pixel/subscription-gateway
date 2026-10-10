@@ -212,7 +212,6 @@ function transformer_main(): never
     try {
         $tokenHash = token_hash_value($token);
         $groupId = tracking_assignment_for_hash($pdo, $tokenHash);
-        $mapping = tracking_effective_mapping($pdo, $groupId);
     } catch (DomainException $error) {
         tracking_record_transform_event_safe($pdo, $groupId, $mode, 'UNKNOWN', 'MAPPING_INCOMPLETE');
         if ($mode === 'preflight') {
@@ -249,12 +248,21 @@ function transformer_main(): never
         transformer_error(503);
     }
     try {
+        // Learn the complete, validated connection-host set before requiring a
+        // configured mapping. No client response bytes are changed by learning.
+        tracking_sync_source_hosts($pdo, tracking_subscription_source_hosts($body));
+        $mapping = tracking_effective_mapping($pdo, $groupId);
         $transformed = tracking_transform_subscription_body($body, $mapping);
         tracking_record_transform_event_safe($pdo, $groupId, $mode, $transformed['format'], 'SUCCESS');
         if ($mode === 'preflight') {
             transformer_emit_upstream($response, $method);
         }
         transformer_emit_upstream($response, $method, $transformed['content']);
+    } catch (DomainException) {
+        tracking_record_transform_event_safe($pdo, $groupId, $mode, 'UNKNOWN', 'MAPPING_INCOMPLETE');
+        if ($mode === 'preflight') transformer_emit_upstream($response, $method);
+        fclose($response['stream']);
+        transformer_error(503);
     } catch (TrackingTransformFailure $failure) {
         tracking_record_transform_event_safe($pdo, $groupId, $mode, $failure->format, $failure->reason);
         if ($mode === 'preflight') {

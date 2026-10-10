@@ -14,7 +14,7 @@ try {
     error_log('Admin startup failure: ' . $error::class);
     http_response_code(503);
     header('Content-Type: text/plain; charset=utf-8');
-    echo 'Administrator service configuration error.';
+    echo '后台服务配置异常，请检查服务日志。';
     exit;
 }
 
@@ -41,20 +41,21 @@ $csrf = csrf_token();
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="csrf-token" content="<?= htmlspecialchars($csrf, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
-    <title>Subscription Gateway Admin</title>
+    <title>订阅清洗网关 · 管理员登录</title>
     <style>
-        :root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;background:#080e17;color:#d8e3f0}
+        :root{color-scheme:light;font:14px/1.45 system-ui,sans-serif;background:#F4F7FB;color:#1F2937}
         *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center}
-        form{width:min(360px,calc(100vw - 32px));padding:22px;border:1px solid #26364a;background:#101927}
-        h1{font-size:18px;margin:0 0 18px}label{display:block;margin:12px 0 5px;color:#9fb2c8}
-        input,button{width:100%;height:38px;border:1px solid #30435b;background:#0b1420;color:#e8f1fa;padding:0 10px}
-        button{margin-top:18px;background:#0d6170;border-color:#17889a;cursor:pointer;font-weight:600}
-        #error{min-height:20px;margin-top:10px;color:#ff8795;font-size:12px}
+        form{width:min(360px,calc(100vw - 32px));padding:22px;border:1px solid #DCE4EE;background:#FFFFFF;border-radius:8px}
+        h1{font-size:18px;margin:0 0 18px}label{display:block;margin:12px 0 5px;color:#64748B}
+        input,button{width:100%;height:38px;border:1px solid #DCE4EE;background:#FFFFFF;color:#1F2937;padding:0 10px;border-radius:4px}
+        input:focus-visible{outline:2px solid #0891B2;outline-offset:2px}
+        button{margin-top:18px;background:#0891B2;border-color:#0891B2;color:#FFFFFF;cursor:pointer;font-weight:600}
+        #error{min-height:20px;margin-top:10px;color:#DC2626;font-size:12px}
     </style>
 </head>
 <body>
 <form id="login" autocomplete="off">
-    <h1>Subscription Gateway</h1>
+    <h1>订阅清洗网关</h1>
     <label for="username">管理员</label>
     <input id="username" name="username" autocomplete="username" required maxlength="64">
     <label for="password">密码</label>
@@ -83,7 +84,7 @@ document.getElementById('login').addEventListener('submit', async (event) => {
         if (!response.ok || !data.ok) throw new Error(data.error || '登录失败');
         location.replace(base + '/');
     } catch (exception) {
-        error.textContent = exception.message || '登录失败';
+        error.textContent = /[\u3400-\u9fff]/.test(exception.message || '') ? exception.message : '登录失败，请检查网络后重试';
     }
 });
 </script>

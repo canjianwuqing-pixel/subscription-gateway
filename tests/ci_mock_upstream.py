@@ -6,6 +6,10 @@ from urllib.parse import parse_qs, urlparse
 class MockHandler(BaseHTTPRequestHandler):
     def response(self):
         response_format = parse_qs(urlparse(self.path).query).get("format", [""])[0]
+        if response_format == "new-source":
+            return 200, "text/plain", (
+                b"trojan://password@new.example.invalid:443?sni=sni-only.example.invalid#name-only.example.invalid\n"
+            )
         if response_format == "uri":
             return 200, "text/plain", (
                 b"vless://uuid@origin.example.invalid:443?security=reality&"

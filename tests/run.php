@@ -517,6 +517,7 @@ require __DIR__ . '/phase2.php';
 require __DIR__ . '/phase3.php';
 require __DIR__ . '/phase4.php';
 require __DIR__ . '/installation.php';
+require __DIR__ . '/admin_workflow.php';
 
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";

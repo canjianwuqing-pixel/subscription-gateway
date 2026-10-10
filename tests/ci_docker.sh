@@ -86,7 +86,7 @@ TOKEN_HMAC_KEY=$hmac
 TOKEN_ENCRYPTION_KEY=$encryption
 ENV
 chmod 0600 "$env_file"
-unset hmac encryption admin_path
+unset hmac encryption
 
 compose config --quiet
 compose build gateway admin
@@ -94,7 +94,6 @@ compose run --rm --no-deps -T --entrypoint su-exec admin \
     www-data php /app/src/cli.php migrate >/dev/null
 printf '%s' "$admin_password" | compose run --rm --no-deps -T --entrypoint su-exec admin \
     www-data php /app/src/cli.php init-admin ci_admin >/dev/null
-unset admin_password
 
 compose up -d
 healthy() {
@@ -202,6 +201,86 @@ for attempt in {1..30}; do
 done
 [[ $ingested == 1 ]] || fail 'worker did not securely ingest the Token event'
 
+# Real TLS Admin requests exercise the actual session/authentication/API boundary.
+admin_cookie=$temporary/admin-cookie
+admin_url=https://127.0.0.1:16444/$admin_path
+admin_request() {
+    admin_code=$(curl --silent --show-error --insecure --noproxy '*' \
+        --cookie "$admin_cookie" --cookie-jar "$admin_cookie" \
+        --output "$temporary/admin-response" --write-out '%{http_code}' "$admin_url/$1" "${@:2}")
+}
+for endpoint in api/tokens api/analysis/tokens api/logs api/tokens/1/full api/tokens/1/detail; do
+    admin_request "$endpoint"
+    [[ $admin_code == 401 ]] || fail 'anonymous Admin Token endpoint was not denied'
+    if grep -Fq "$token" "$temporary/admin-response"; then fail 'anonymous API leaked a Token'; fi
+done
+admin_request api/session
+admin_csrf=$(jq -er .csrf_token "$temporary/admin-response")
+jq -n --arg password "$admin_password" '{username:"ci_admin",password:$password}' > "$temporary/login.json"
+admin_request api/login --request POST --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/login.json"
+[[ $admin_code == 200 ]] || fail 'Admin login failed'
+admin_csrf=$(jq -er .csrf_token "$temporary/admin-response")
+admin_request api/tokens
+jq -e --arg token "$token" '.tokens | any(.token == $token and .tracking_group_path != null and .token_encrypted == null)' \
+    "$temporary/admin-response" >/dev/null || fail 'authenticated Token list lacks full Token or off assignment'
+token_id=$(jq -er --arg token "$token" '.tokens[] | select(.token == $token) | .id' "$temporary/admin-response")
+admin_request "api/tokens/$token_id/detail"
+jq -e --arg token "$token" '.detail.token.token == $token and .detail.token.tracking_group_path != null' \
+    "$temporary/admin-response" >/dev/null || fail 'Token detail lacks full Token or group'
+admin_request "api/logs?token=$token"
+jq -e --arg token "$token" '.result.rows | length > 0 and all(.token == $token and .tracking_group_path != null)' \
+    "$temporary/admin-response" >/dev/null || fail 'full Token log search failed'
+admin_request "api/logs?token=$(openssl rand -hex 16)"
+[[ $admin_code == 200 ]] && jq -e '.result.rows == []' "$temporary/admin-response" >/dev/null \
+    || fail 'unknown Token log search did not return empty'
+admin_request 'api/logs?token=partial'
+[[ $admin_code == 422 ]] || fail 'partial Token search was not rejected'
+manual_token=$(openssl rand -hex 16)
+jq -n --arg token "$manual_token" '{token:$token,state:"NORMAL"}' > "$temporary/manual-token.json"
+admin_request api/tokens --request POST --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/manual-token.json"
+[[ $admin_code == 200 || $admin_code == 202 ]] || fail 'manual Token API failed'
+db assert-assigned "$manual_token"
+
+# Independent second login must be invalidated by auth_version, not just rotation.
+primary_cookie=$admin_cookie
+admin_cookie=$temporary/other-admin-cookie
+admin_request api/session
+other_csrf=$(jq -er .csrf_token "$temporary/admin-response")
+admin_request api/login --request POST --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $other_csrf" --data-binary "@$temporary/login.json"
+[[ $admin_code == 200 ]] || fail 'second independent Admin login failed'
+other_cookie=$admin_cookie
+admin_cookie=$primary_cookie
+jq -n --arg password "$admin_password" '{current_password:$password,new_password:"123456"}' > "$temporary/password.json"
+admin_request api/admin/password --request PATCH --header 'Content-Type: application/json' \
+    --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/password.json"
+[[ $admin_code == 200 ]] || fail 'six-byte Admin password was not accepted'
+admin_request api/tokens
+[[ $admin_code == 200 ]] || fail 'password change invalidated the current session'
+admin_cookie=$other_cookie
+admin_request api/tokens
+[[ $admin_code == 401 ]] || fail 'password change did not invalidate another session'
+admin_cookie=$primary_cookie
+admin_request ''
+[[ $admin_code == 200 ]] || fail 'authenticated dashboard could not be rendered'
+grep -Fq 'color-scheme:light' "$temporary/admin-response" || fail 'dashboard is not light themed'
+if grep -Fq "$token" "$temporary/admin-response" || grep -Fq "$manual_token" "$temporary/admin-response"; then
+    fail 'dashboard statically embedded full Tokens'
+fi
+unset admin_password admin_path manual_token admin_csrf other_csrf
+printf 'PASS: authenticated Admin APIs, exact Token logs, off assignments, six-byte password and session invalidation\n'
+
+# Start with no configured mappings: preflight must learn and return original bytes.
+db tracking-mode preflight
+publish
+request "$path?token=$token&format=uri"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'empty-mapping preflight failed'
+grep -Fq '@origin.example.invalid:443' "$temporary/response" \
+    || fail 'empty-mapping preflight changed the original body'
+db assert-learned origin.example.invalid
+
 db tracking-configure "$token" preflight
 publish
 request "$path?token=$token&format=uri"
@@ -280,6 +359,19 @@ if grep -Fq '@origin.example.invalid:443' "$temporary/response"; then
 fi
 compose start admin >/dev/null
 healthy admin || fail 'Admin did not recover after enforced failure test'
+
+request "$path?token=$token&format=new-source"
+[[ $request_exit == 0 && $request_code == 503 ]] || fail 'new unmapped source did not fail closed in enforced mode'
+if grep -Fq '@new.example.invalid:443' "$temporary/response"; then fail 'enforced missing mapping leaked original body'; fi
+db assert-learned new.example.invalid
+db tracking-mode preflight
+publish
+request "$path?token=$token&format=new-source"
+[[ $request_exit == 0 && $request_code == 200 ]] || fail 'new-source preflight failed'
+grep -Fq '@new.example.invalid:443' "$temporary/response" || fail 'new-source preflight altered original body'
+db tracking-configure "$token" enforced
+publish
+printf 'PASS: source auto-learning, empty-mapping preflight and enforced missing-target fail-closed\n'
 
 db token "$token" BLOCKED
 publish

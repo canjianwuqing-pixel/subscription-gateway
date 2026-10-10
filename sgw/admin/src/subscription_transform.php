@@ -15,6 +15,32 @@ final class TrackingTransformFailure extends RuntimeException
     }
 }
 
+/** Metadata-only identity pass through the same structured parser/validation. */
+final class TrackingSourceCollector
+{
+    /** @var array<string,true> */
+    public array $hosts = [];
+
+    public function collect(string $host, string $format): string
+    {
+        $this->hosts[$host] = true;
+        if (count($this->hosts) > 1000) {
+            throw new TrackingTransformFailure('RESPONSE_TOO_LARGE', $format, 'Too many source hosts');
+        }
+        return $host;
+    }
+}
+
+/** @return list<string> */
+function tracking_subscription_source_hosts(string $body): array
+{
+    $sources = new TrackingSourceCollector();
+    tracking_transform_subscription_body($body, [], true, $sources);
+    $hosts = array_keys($sources->hosts);
+    sort($hosts, SORT_STRING);
+    return $hosts;
+}
+
 /** @return array{decoded:string,urlsafe:bool,padded:bool} */
 function tracking_decode_base64(string $encoded, string $format): array
 {
@@ -53,13 +79,14 @@ function tracking_encode_base64(string $content, array $meta): string
 }
 
 /** @param array<string, string> $mapping */
-function tracking_mapped_host(string $host, array $mapping, string $format): string
+function tracking_mapped_host(string $host, array $mapping, string $format, ?TrackingSourceCollector $sources = null): string
 {
     try {
         $normalized = normalize_tracking_host($host);
     } catch (InvalidArgumentException $error) {
         throw new TrackingTransformFailure('PARSE_FAILED', $format, $error->getMessage());
     }
+    if ($sources !== null) return $sources->collect($normalized, $format);
     if (!array_key_exists($normalized, $mapping)) {
         throw new TrackingTransformFailure('MAPPING_INCOMPLETE', $format, 'Entry mapping is incomplete');
     }
@@ -75,7 +102,7 @@ function tracking_uri_host_text(string $host): string
  * @param array<string, string> $mapping
  * @return array{content:string,source_host:string,target_host:string}
  */
-function tracking_transform_authority_uri(string $uri, array $mapping, string $format = 'URI'): array
+function tracking_transform_authority_uri(string $uri, array $mapping, string $format = 'URI', ?TrackingSourceCollector $sources = null): array
 {
     $schemeEnd = strpos($uri, '://');
     if ($schemeEnd === false || $schemeEnd < 1) {
@@ -119,7 +146,7 @@ function tracking_transform_authority_uri(string $uri, array $mapping, string $f
         $hostOffset = $authorityStart + $hostPortOffset;
         $hostLength = strlen($host);
     }
-    $target = tracking_mapped_host($host, $mapping, $format);
+    $target = tracking_mapped_host($host, $mapping, $format, $sources);
     $replacement = tracking_uri_host_text($target);
     $transformed = substr($uri, 0, $hostOffset) . $replacement . substr($uri, $hostOffset + $hostLength);
     $outsideBefore = substr($uri, 0, $hostOffset) . substr($uri, $hostOffset + $hostLength);
@@ -133,7 +160,7 @@ function tracking_transform_authority_uri(string $uri, array $mapping, string $f
 }
 
 /** @param array<string, string> $mapping */
-function tracking_transform_vmess_uri(string $uri, array $mapping): string
+function tracking_transform_vmess_uri(string $uri, array $mapping, ?TrackingSourceCollector $sources = null): string
 {
     $prefix = substr($uri, 0, strlen('vmess://'));
     $payload = substr($uri, strlen($prefix));
@@ -150,7 +177,7 @@ function tracking_transform_vmess_uri(string $uri, array $mapping): string
         throw new TrackingTransformFailure('PARSE_FAILED', 'VMESS', 'VMess server address is missing');
     }
     $original = $document;
-    $document['add'] = tracking_mapped_host($document['add'], $mapping, 'VMESS');
+    $document['add'] = tracking_mapped_host($document['add'], $mapping, 'VMESS', $sources);
     $comparison = $document;
     $comparison['add'] = $original['add'];
     if ($comparison !== $original) {
@@ -165,18 +192,18 @@ function tracking_transform_vmess_uri(string $uri, array $mapping): string
 }
 
 /** @param array<string, string> $mapping */
-function tracking_transform_ss_uri(string $uri, array $mapping): string
+function tracking_transform_ss_uri(string $uri, array $mapping, ?TrackingSourceCollector $sources = null): string
 {
     $prefix = substr($uri, 0, strlen('ss://'));
     $payloadStart = strlen($prefix);
     $suffixOffset = strcspn($uri, '?#', $payloadStart) + $payloadStart;
     $authority = substr($uri, $payloadStart, $suffixOffset - $payloadStart);
     if (str_contains($authority, '@')) {
-        return tracking_transform_authority_uri($uri, $mapping)['content'];
+        return tracking_transform_authority_uri($uri, $mapping, 'URI', $sources)['content'];
     }
     $decoded = tracking_decode_base64($authority, 'URI');
     $innerPrefix = 'ss://';
-    $inner = tracking_transform_authority_uri($innerPrefix . $decoded['decoded'], $mapping)['content'];
+    $inner = tracking_transform_authority_uri($innerPrefix . $decoded['decoded'], $mapping, 'URI', $sources)['content'];
     $encoded = tracking_encode_base64(substr($inner, strlen($prefix)), $decoded);
     return $prefix . $encoded . substr($uri, $suffixOffset);
 }
@@ -185,7 +212,7 @@ function tracking_transform_ss_uri(string $uri, array $mapping): string
  * @param array<string, string> $mapping
  * @return array{content:string,format:string,node_count:int}|null
  */
-function tracking_try_transform_uri_list(string $body, array $mapping): ?array
+function tracking_try_transform_uri_list(string $body, array $mapping, ?TrackingSourceCollector $sources = null): ?array
 {
     $parts = preg_split('/(\r\n|\n|\r)/', $body, -1, PREG_SPLIT_DELIM_CAPTURE);
     if (!is_array($parts)) {
@@ -206,12 +233,12 @@ function tracking_try_transform_uri_list(string $body, array $mapping): ?array
         }
         $scheme = strtolower($match[1]);
         if ($scheme === 'vmess') {
-            $replacement = tracking_transform_vmess_uri($line, $mapping);
+            $replacement = tracking_transform_vmess_uri($line, $mapping, $sources);
             $vmessNodes++;
         } elseif ($scheme === 'ss') {
-            $replacement = tracking_transform_ss_uri($line, $mapping);
+            $replacement = tracking_transform_ss_uri($line, $mapping, $sources);
         } else {
-            $replacement = tracking_transform_authority_uri($line, $mapping)['content'];
+            $replacement = tracking_transform_authority_uri($line, $mapping, 'URI', $sources)['content'];
         }
         $leading = substr($part, 0, strlen($part) - strlen(ltrim($part)));
         $trailing = substr($part, strlen(rtrim($part)));
@@ -229,7 +256,7 @@ function tracking_try_transform_uri_list(string $body, array $mapping): ?array
  * @param array<string, string> $mapping
  * @return array{content:string,format:string,node_count:int}|null
  */
-function tracking_try_transform_yaml(string $body, array $mapping): ?array
+function tracking_try_transform_yaml(string $body, array $mapping, ?TrackingSourceCollector $sources = null): ?array
 {
     if (!preg_match('/(?:^|\r\n|\n|\r)[ \t]*proxies[ \t]*:/', $body)) {
         return null;
@@ -247,7 +274,7 @@ function tracking_try_transform_yaml(string $body, array $mapping): ?array
         if (!is_array($proxy) || !is_string($proxy['server'] ?? null)) {
             throw new TrackingTransformFailure('PARSE_FAILED', 'YAML', 'Clash proxy server is invalid');
         }
-        $proxy['server'] = tracking_mapped_host($proxy['server'], $mapping, 'YAML');
+        $proxy['server'] = tracking_mapped_host($proxy['server'], $mapping, 'YAML', $sources);
         $nodes++;
     }
     unset($proxy);
@@ -279,16 +306,16 @@ function tracking_looks_like_base64(string $body): bool
  * @param array<string, string> $mapping
  * @return array{content:string,format:string,node_count:int}
  */
-function tracking_transform_subscription_body(string $body, array $mapping, bool $allowOuterBase64 = true): array
+function tracking_transform_subscription_body(string $body, array $mapping, bool $allowOuterBase64 = true, ?TrackingSourceCollector $sources = null): array
 {
-    if ($mapping === []) {
+    if ($mapping === [] && $sources === null) {
         throw new TrackingTransformFailure('MAPPING_INCOMPLETE', 'UNKNOWN', 'Entry mapping is empty');
     }
-    $yaml = tracking_try_transform_yaml($body, $mapping);
+    $yaml = tracking_try_transform_yaml($body, $mapping, $sources);
     if ($yaml !== null) {
         return $yaml;
     }
-    $uris = tracking_try_transform_uri_list($body, $mapping);
+    $uris = tracking_try_transform_uri_list($body, $mapping, $sources);
     if ($uris !== null) {
         return $uris;
     }
@@ -303,7 +330,7 @@ function tracking_transform_subscription_body(string $body, array $mapping, bool
             if (preg_match('//u', $decoded['decoded']) !== 1) {
                 throw new TrackingTransformFailure('PARSE_FAILED', 'BASE64', 'Decoded subscription is not UTF-8');
             }
-            $inner = tracking_transform_subscription_body($decoded['decoded'], $mapping, false);
+            $inner = tracking_transform_subscription_body($decoded['decoded'], $mapping, false, $sources);
         } catch (TrackingTransformFailure $failure) {
             throw new TrackingTransformFailure($failure->reason, 'BASE64', $failure->getMessage());
         }

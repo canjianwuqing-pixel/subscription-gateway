@@ -48,7 +48,8 @@ SQL);
 
 function token_analysis_rows(PDO $pdo, int $limit = 50, ?int $trackingGroupId = null): array
 {
-    $limit = max(1, min(100, $limit));
+    tracking_backfill_token_assignments($pdo);
+    $limit = max(1, min(50, $limit));
     if ($trackingGroupId !== null && $trackingGroupId < 1) {
         throw new InvalidArgumentException('Invalid tracking group filter');
     }
@@ -88,7 +89,7 @@ SQL);
     $rows = $query->fetchAll();
     foreach ($rows as &$row) {
         $plain = decrypt_token((string) $row['token_encrypted']);
-        $row['token_hint'] = substr($plain, 0, 6) . '…' . substr($plain, -4);
+        $row['token'] = $plain;
         unset($row['token_encrypted']);
         $labels = [];
         if ((int) $row['ips_24h'] >= 5) $labels[] = '多IP';
@@ -108,13 +109,16 @@ SQL);
 
 function token_detail_data(PDO $pdo, int $id, string $window): ?array
 {
-    $query = $pdo->prepare('SELECT t.id, t.state, t.expires_at, t.first_seen, t.last_seen, t.request_count, '
+    tracking_backfill_token_assignments($pdo);
+    $query = $pdo->prepare('SELECT t.id, t.token_encrypted, t.state, t.expires_at, t.first_seen, t.last_seen, t.request_count, '
         . 'a.group_id AS tracking_group_id, g.path AS tracking_group_path FROM tokens t '
         . 'LEFT JOIN tracking_assignments a ON a.token_hash = t.token_hash '
         . 'LEFT JOIN tracking_groups g ON g.id = a.group_id WHERE t.id = :id');
     $query->execute([':id' => $id]);
     $token = $query->fetch();
     if (!is_array($token)) return null;
+    $token['token'] = decrypt_token((string) $token['token_encrypted']);
+    unset($token['token_encrypted']);
     $since = time() - time_window($window);
     $logs = $pdo->prepare('SELECT id, client_ip, user_agent, status_code, request_path, decision, created_at '
         . 'FROM access_logs WHERE token_id = :id AND created_at >= :since ORDER BY created_at DESC, id DESC LIMIT 100');
@@ -131,6 +135,7 @@ function token_detail_data(PDO $pdo, int $id, string $window): ?array
 
 function access_log_page(PDO $pdo, array $filters): array
 {
+    tracking_backfill_token_assignments($pdo);
     $window = time_window((string) ($filters['window'] ?? '24h'));
     $page = min(10000, max(1, (int) ($filters['page'] ?? 1)));
     $where = ['l.created_at >= :since'];
@@ -153,8 +158,17 @@ function access_log_page(PDO $pdo, array $filters): array
         $where[] = 'l.token_id = :token_id';
         $params[':token_id'] = (int) $filters['token_id'];
     }
+    if (isset($filters['token']) && $filters['token'] !== '') {
+        $plain = (string) $filters['token'];
+        validate_token_format($plain);
+        $where[] = 't.token_hash = :token_hash';
+        $params[':token_hash'] = token_hash_value($plain);
+    }
     $sql = 'SELECT l.id, l.token_id, l.client_ip, l.user_agent, l.request_path, '
-        . 'l.status_code, l.decision, l.created_at FROM access_logs l WHERE '
+        . 'l.status_code, l.decision, l.created_at, t.token_encrypted, g.path AS tracking_group_path '
+        . 'FROM access_logs l LEFT JOIN tokens t ON t.id = l.token_id '
+        . 'LEFT JOIN tracking_assignments a ON a.token_hash = t.token_hash '
+        . 'LEFT JOIN tracking_groups g ON g.id = a.group_id WHERE '
         . implode(' AND ', $where) . ' ORDER BY l.created_at DESC, l.id DESC LIMIT 50 OFFSET :offset';
     $statement = $pdo->prepare($sql);
     foreach ($params as $key => $value) {
@@ -162,5 +176,11 @@ function access_log_page(PDO $pdo, array $filters): array
     }
     $statement->bindValue(':offset', ($page - 1) * 50, PDO::PARAM_INT);
     $statement->execute();
-    return ['page' => $page, 'rows' => $statement->fetchAll()];
+    $rows = $statement->fetchAll();
+    foreach ($rows as &$row) {
+        $row['token'] = is_string($row['token_encrypted']) ? decrypt_token($row['token_encrypted']) : null;
+        unset($row['token_encrypted']);
+    }
+    unset($row);
+    return ['page' => $page, 'rows' => $rows];
 }

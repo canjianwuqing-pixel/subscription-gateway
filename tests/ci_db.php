@@ -84,6 +84,31 @@ switch ($command) {
         $mapping = tracking_effective_mapping($pdo, $groupId);
         echo $mapping['origin.example.invalid'] . "\n";
         exit(0);
+    case 'assert-assigned':
+        $token = (string) ($argv[2] ?? '');
+        validate_token_format($token);
+        $statement = $pdo->prepare('SELECT group_id FROM tracking_assignments WHERE token_hash=:hash');
+        $statement->execute([':hash' => token_hash_value($token)]);
+        $groupId = (int) $statement->fetchColumn();
+        if (!tracking_group_is_active_leaf($pdo, $groupId)) {
+            throw new RuntimeException('Token assignment is missing or not an active leaf');
+        }
+        break;
+    case 'assert-learned':
+        $expectedSource = (string) ($argv[2] ?? 'origin.example.invalid');
+        foreach (tracking_active_leaves($pdo) as $leaf) {
+            $rows = tracking_group_mappings($pdo, (int) $leaf['id']);
+            $matched = array_values(array_filter($rows, static fn ($row) => $row['source_host'] === $expectedSource));
+            if (count($matched) !== 1 || $matched[0]['target_host'] !== null) {
+                throw new RuntimeException('Learning did not add exactly one empty target to every leaf');
+            }
+            foreach ($rows as $row) {
+                if (str_contains($row['source_host'], 'sni-only') || str_contains($row['source_host'], 'name-only')) {
+                    throw new RuntimeException('Learning captured a non-connection field');
+                }
+            }
+        }
+        break;
     case 'assert-ingested':
         $token = (string) ($argv[2] ?? '');
         validate_token_format($token);
@@ -100,6 +125,11 @@ switch ($command) {
         $statement->execute([':id' => (int) $row['id']]);
         if ((int) $statement->fetchColumn() < 1) {
             throw new RuntimeException('No access log was ingested');
+        }
+        $statement = $pdo->prepare('SELECT COUNT(*) FROM tracking_assignments WHERE token_hash=:hash');
+        $statement->execute([':hash' => token_hash_value($token)]);
+        if ((int) $statement->fetchColumn() !== 1) {
+            throw new RuntimeException('off worker did not create a unique assignment');
         }
         break;
     default:

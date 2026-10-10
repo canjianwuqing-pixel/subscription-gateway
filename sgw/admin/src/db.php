@@ -435,8 +435,8 @@ function preferred_password_algorithm(): string|int|null
 
 function password_hash_secure(string $password): string
 {
-    if (strlen($password) < 12 || strlen($password) > 1024) {
-        throw new InvalidArgumentException('Password must contain 12-1024 bytes');
+    if (strlen($password) < 6 || strlen($password) > 1024) {
+        throw new InvalidArgumentException('密码长度必须为6至1024字节');
     }
     $hash = password_hash($password, preferred_password_algorithm());
     if ($hash === false) {
@@ -513,18 +513,15 @@ function authenticate_admin(PDO $pdo, string $username, string $password): ?arra
 
 function change_admin_password(PDO $pdo, int $id, string $current, string $replacement): int
 {
-    if (strlen($replacement) < 16 || strlen($replacement) > 1024
-        || !preg_match('/[a-z]/', $replacement) || !preg_match('/[A-Z]/', $replacement)
-        || !preg_match('/[0-9]/', $replacement)
-    ) {
-        throw new InvalidArgumentException('New password needs 16+ characters with upper, lower and digit');
+    if (strlen($replacement) < 6 || strlen($replacement) > 1024) {
+        throw new InvalidArgumentException('新密码长度必须为6至1024字节');
     }
     return write_transaction($pdo, static function () use ($pdo, $id, $current, $replacement): int {
         $query = $pdo->prepare('SELECT password_hash FROM admins WHERE id = :id');
         $query->execute([':id' => $id]);
         $old = $query->fetchColumn();
         if (!is_string($old) || !password_verify($current, $old)) {
-            throw new DomainException('Current password is incorrect');
+            throw new DomainException('当前密码不正确');
         }
         $update = $pdo->prepare('UPDATE admins SET password_hash = :hash, auth_version = auth_version + 1, '
             . 'updated_at = :updated WHERE id = :id');

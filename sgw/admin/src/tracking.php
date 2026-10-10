@@ -168,6 +168,18 @@ SQL);
     });
 }
 
+function tracking_backfill_token_assignments(PDO $pdo): void
+{
+    // Repair pre-existing v3 Tokens that were ingested while tracking was off.
+    // Only hashes are read; no full-library Token decryption or reassignment.
+    $hashes = $pdo->query('SELECT t.token_hash FROM tokens t LEFT JOIN tracking_assignments a '
+        . 'ON a.token_hash=t.token_hash WHERE a.token_hash IS NULL')->fetchAll(PDO::FETCH_COLUMN);
+    if ($hashes === []) return;
+    write_transaction($pdo, static function () use ($pdo, $hashes): void {
+        foreach ($hashes as $hash) tracking_assignment_for_hash($pdo, (string) $hash);
+    });
+}
+
 /** @return list<array{id:int,source_host:string,target_host:?string}> */
 function tracking_group_mappings(PDO $pdo, int $groupId): array
 {
@@ -182,6 +194,54 @@ function tracking_group_mappings(PDO $pdo, int $groupId): array
             'target_host' => $row['target_host'] === null ? null : (string) $row['target_host']];
     }
     return $rows;
+}
+
+/** Learn only parser-validated connection hosts; never overwrite targets or prune sources.
+ * @param list<string> $hosts
+ */
+function tracking_sync_source_hosts(PDO $pdo, array $hosts): void
+{
+    $sources = [];
+    foreach ($hosts as $host) $sources[normalize_tracking_host($host)] = true;
+    if (count($sources) > 1000) throw new InvalidArgumentException('原入口超过1000个，无法同步');
+    if ($sources === []) return;
+    write_transaction($pdo, static function () use ($pdo, $sources): void {
+        $insert = $pdo->prepare('INSERT INTO tracking_entry_mappings '
+            . '(group_id,source_host,target_host,created_at,updated_at) VALUES (:group,:source,NULL,:now,:now) '
+            . 'ON CONFLICT(group_id,source_host) DO NOTHING');
+        $now = time();
+        foreach (tracking_active_leaves($pdo) as $leaf) {
+            // Pending children stay compatible with sources learned after splitting.
+            $ids = [(int) $leaf['id']];
+            foreach (tracking_children($pdo, (int) $leaf['id'], 'DRAFT') as $child) $ids[] = (int) $child['id'];
+            foreach ($ids as $id) {
+                foreach (array_keys($sources) as $source) {
+                    $insert->execute([':group' => $id, ':source' => $source, ':now' => $now]);
+                }
+            }
+        }
+    });
+}
+
+/** Admin form edits targets only; discovered sources cannot be removed or added.
+ * @param list<array{source_host:mixed,target_host:mixed}> $rows
+ */
+function tracking_save_group_targets(PDO $pdo, int $groupId, array $rows): void
+{
+    write_transaction($pdo, static function () use ($pdo, $groupId, $rows): void {
+        $known = array_column(tracking_group_mappings($pdo, $groupId), 'source_host');
+        $provided = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) throw new InvalidArgumentException('入口映射格式不正确');
+            $provided[] = normalize_tracking_host((string) ($row['source_host'] ?? ''));
+        }
+        sort($known, SORT_STRING);
+        sort($provided, SORT_STRING);
+        if ($known === [] || $known !== $provided) {
+            throw new DomainException('原入口列表已变化，请刷新后重新填写目标入口');
+        }
+        tracking_save_group_mappings($pdo, $groupId, $rows);
+    });
 }
 
 /** @return array<string, string> */
