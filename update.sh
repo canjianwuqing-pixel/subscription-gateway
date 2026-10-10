@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 umask 077
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 # shellcheck source=sgw/ops.sh
@@ -68,11 +68,13 @@ trap 'update_status=$?; trap - ERR; rollback; exit "$update_status"' ERR
 
 if [[ ${1:-} == --pull ]]; then
     (
+        # Handle failures once in the private-umask parent, not inside this shell.
+        trap - ERR
         umask 022
         git -C "$ROOT_DIR" pull --ff-only
     )
 fi
-(prepare_admin_source_permissions "$ROOT_DIR")
+(trap - ERR; prepare_admin_source_permissions "$ROOT_DIR")
 compose config >/dev/null
 compose build
 admin_cli migrate >/dev/null
