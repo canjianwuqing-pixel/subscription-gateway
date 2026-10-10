@@ -375,25 +375,25 @@ for mapping_case in tampered missing extra duplicate string integer null empty s
 done
 printf 'PASS: authenticated mapping JSON PUT, IPv4/domain/IPv6 SQLite saves and unchanged safety validation\n'
 
-# Dynamic split/delete/cancel use real authenticated HTTP and never move assignments.
+# Binary split/delete/cancel use real authenticated HTTP and never move assignments.
 assignment_before=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php assignment-digest)
-for child_count in 1 21 3.5 '"4"' null true; do
+for child_count in 1 3 4 20 21 3.5 '"4"' null true; do
     jq -n --argjson count "$child_count" '{child_count:$count}' > "$temporary/split.json"
     admin_request "api/tracking/groups/$mapping_group/split" --request POST \
         --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" \
         --data-binary "@$temporary/split.json"
     [[ $admin_code == 422 ]] || fail 'invalid child_count was accepted by the HTTP API'
 done
-jq -n '{child_count:4}' > "$temporary/split.json"
+jq -n '{}' > "$temporary/split.json"
 admin_request "api/tracking/groups/$mapping_group/split" --request POST \
     --header 'Content-Type: application/json' --data-binary "@$temporary/split.json"
 [[ $admin_code == 403 ]] || fail 'split creation accepted missing CSRF'
 admin_request "api/tracking/groups/$mapping_group/split" --request POST \
     --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" \
     --data-binary "@$temporary/split.json"
-[[ $admin_code == 200 ]] || fail 'dynamic four-child HTTP split creation failed'
-jq -e '.children | length == 4 and all(.status == "DRAFT")' "$temporary/admin-response" >/dev/null \
-    || fail 'HTTP split did not return four DRAFT children'
+[[ $admin_code == 200 ]] || fail 'default binary HTTP split creation failed'
+jq -e '.children | length == 2 and [.[].child_no] == [1,2] and all(.status == "DRAFT")' "$temporary/admin-response" >/dev/null \
+    || fail 'HTTP split did not return two DRAFT children'
 draft_ids=$(jq -r '.children[].id' "$temporary/admin-response")
 deleted_draft=$(jq -er '.children[1].id' "$temporary/admin-response")
 for draft_id in $draft_ids; do
@@ -415,12 +415,14 @@ admin_request "api/tracking/groups/$deleted_draft" --request DELETE --header "X-
 [[ $admin_code == 200 ]] || fail 'DRAFT HTTP deletion failed'
 admin_request api/tracking
 jq -e --argjson parent "$mapping_group" \
-    '[.tracking.groups[] | select(.parent_id == $parent and .status == "DRAFT")] | length == 3 and [.[].child_no] == [1,2,3]' \
+    '[.tracking.groups[] | select(.parent_id == $parent and .status == "DRAFT")] | length == 1 and [.[].child_no] == [1]' \
     "$temporary/admin-response" >/dev/null || fail 'DRAFT children were not renumbered continuously'
 for draft_id in $draft_ids; do
     [[ $draft_id == "$deleted_draft" ]] && continue
     db assert-mapping "$draft_id" origin.example.invalid "child-$draft_id.example.com"
 done
+admin_request "api/tracking/groups/$mapping_group/activate-split" --request POST --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 409 ]] || fail 'one remaining DRAFT was activated'
 admin_request "api/tracking/groups/$mapping_group/split" --request DELETE --header "X-CSRF-Token: $admin_csrf"
 [[ $admin_code == 200 ]] || fail 'pending HTTP split cancellation failed'
 admin_request api/tracking
@@ -432,8 +434,8 @@ admin_request "api/tracking/groups/$mapping_group" --request DELETE --header "X-
 db assert-mapping "$mapping_group" origin.example.invalid 2001:db8::1
 [[ $assignment_before == "$(compose exec -T admin su-exec www-data php /tmp/ci_db.php assignment-digest)" ]] \
     || fail 'pending split lifecycle moved Token assignments'
-unset admin_csrf mapping_rows mapping_target mapping_case mapping_group child_count draft_ids draft_id deleted_draft assignment_before
-printf 'PASS: authenticated dynamic split creation, DRAFT deletion/renumber/cancel, CSRF and zero assignment movement\n'
+unset mapping_rows mapping_target mapping_case mapping_group child_count draft_ids draft_id deleted_draft assignment_before
+printf 'PASS: authenticated binary split creation, DRAFT deletion/renumber/cancel, CSRF and zero assignment movement\n'
 
 db tracking-configure "$token" preflight
 publish
@@ -653,4 +655,75 @@ if sudo find "$runtime" \( -type f -o -type d \) -perm /0022 -print -quit | grep
     fail 'runtime contains group/world writable files or directories'
 fi
 
+# Real Gateway conversion follows binary activation, undo, and re-activation.
+admin_request api/session
+admin_csrf=$(jq -er .csrf_token "$temporary/admin-response")
+db tracking-configure "$token" enforced
+publish
+admin_request "api/tokens/$token_id/detail"
+binary_parent=$(jq -er '.detail.token.tracking_group_id' "$temporary/admin-response")
+parent_target=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php tracking-target "$token")
+sibling_digest=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php branch-assignment-digest "$binary_parent")
+for binary_round in 1 2; do
+    admin_request api/tracking
+    parent_path=$(jq -er --argjson id "$binary_parent" '.tracking.groups[] | select(.id==$id) | .path' "$temporary/admin-response")
+    parent_tokens=$(jq -er --argjson id "$binary_parent" '.tracking.groups[] | select(.id==$id) | .token_count' "$temporary/admin-response")
+    jq -n '{child_count:2}' > "$temporary/split.json"
+    admin_request "api/tracking/groups/$binary_parent/split" --request POST \
+        --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/split.json"
+    [[ $admin_code == 200 ]] || fail 'binary HTTP re-split failed'
+    jq -e --arg path "$parent_path" '.children | length==2 and [.[].path]==[$path+".1",$path+".2"]' \
+        "$temporary/admin-response" >/dev/null || fail 'binary paths do not match .1/.2'
+    active_ids=$(jq -r '.children[].id' "$temporary/admin-response")
+    for active_id in $active_ids; do
+        jq -n --arg target "binary-$active_id.example.invalid" \
+            '{mappings:[{source_host:"origin.example.invalid",target_host:$target}]}' > "$temporary/mapping.json"
+        admin_request "api/tracking/groups/$active_id/mappings" --request PUT \
+            --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/mapping.json"
+        [[ $admin_code == 200 ]] || fail 'binary child mapping PUT failed'
+    done
+    admin_request "api/tracking/groups/$binary_parent/activate-split" --request POST --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 200 ]] || fail 'binary HTTP activation failed'
+    jq -e --argjson count "$parent_tokens" '.moved==$count' "$temporary/admin-response" >/dev/null \
+        || fail 'activation did not move exactly the parent assignments'
+    child_target=$(compose exec -T admin su-exec www-data php /tmp/ci_db.php tracking-target "$token")
+    [[ $child_target == binary-*.example.invalid ]] || fail 'Token did not use a binary child mapping'
+    request "$path?token=$token&format=uri"
+    [[ $request_exit == 0 && $request_code == 200 ]] && grep -Fq "@$child_target:443" "$temporary/response" \
+        || fail 'Gateway did not convert with active child mapping'
+    for active_id in $active_ids; do
+        admin_request "api/tracking/groups/$active_id" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+        [[ $admin_code == 409 ]] || fail 'ACTIVE child was individually deleted'
+    done
+    # A pending deeper split requires bottom-up handling, even with no Token move.
+    admin_request "api/tracking/groups/$active_id/split" --request POST \
+        --header 'Content-Type: application/json' --header "X-CSRF-Token: $admin_csrf" --data '{}'
+    [[ $admin_code == 200 ]] || fail 'nested DRAFT creation failed'
+    admin_request "api/tracking/groups/$binary_parent/undo-split" --request POST --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 409 ]] || fail 'undo accepted DRAFT grandchildren'
+    admin_request "api/tracking/groups/$active_id/split" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 200 ]] || fail 'nested DRAFT cancellation failed'
+    admin_request "api/tracking/groups/$binary_parent/undo-split" --request POST
+    [[ $admin_code == 403 ]] || fail 'undo accepted missing CSRF'
+    primary_cookie=$admin_cookie
+    admin_cookie=$temporary/anonymous-undo-cookie
+    admin_request "api/tracking/groups/$binary_parent/undo-split" --request POST --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 401 ]] || fail 'anonymous undo was accepted'
+    admin_cookie=$primary_cookie
+    admin_request "api/tracking/groups/$binary_parent/undo-split" --request POST --header "X-CSRF-Token: $admin_csrf"
+    [[ $admin_code == 200 ]] || fail 'ACTIVE HTTP undo failed'
+    jq -e --argjson count "$parent_tokens" '.moved==$count' "$temporary/admin-response" >/dev/null \
+        || fail 'undo did not return all direct child assignments'
+    db assert-assigned-to "$token" "$binary_parent"
+    db assert-binary-history "$binary_parent"
+    request "$path?token=$token&format=uri"
+    [[ $request_exit == 0 && $request_code == 200 ]] && grep -Fq "@$parent_target:443" "$temporary/response" \
+        || fail 'Gateway did not restore parent mapping after undo'
+    [[ $sibling_digest == "$(compose exec -T admin su-exec www-data php /tmp/ci_db.php branch-assignment-digest "$binary_parent")" ]] \
+        || fail 'binary activation or undo modified another main group'
+done
+db tracking-mode off
+publish
+unset admin_csrf
+printf 'PASS: real HTTP binary activation, ACTIVE undo, archived re-split, direct-parent return, unchanged siblings and Gateway mappings\n'
 printf 'PASS: real Linux Docker, Nginx, mock upstream, rules, expiry, logs and permissions\n'

@@ -86,7 +86,7 @@ test_case('draft split does not move assignments and incomplete mappings cannot 
     $before = $phase4Pdo->query('SELECT token_hash, group_id FROM tracking_assignments ORDER BY token_hash')
         ->fetchAll(PDO::FETCH_KEY_PAIR);
     $children = tracking_create_split($phase4Pdo, $parentId);
-    expect_same(['DRAFT', 'DRAFT', 'DRAFT'], array_column($children, 'status'));
+    expect_same(['DRAFT', 'DRAFT'], array_column($children, 'status'));
     $draftIds = array_map('intval', array_column($children, 'id'));
     $newDuringDraft = tracking_assignment_for_hash($phase4Pdo, hash('sha256', 'new-token-during-draft'));
     expect_true(!in_array($newDuringDraft, $draftIds, true), 'A DRAFT group received a Token');
@@ -171,9 +171,9 @@ test_case('recursive split of 1.2 changes only 1.2 and supports a new Token at t
 });
 
 test_case('an already nested leaf can be split again without code changes', function () use ($phase4Pdo): void {
-    $parentId = (int) $phase4Pdo->query("SELECT id FROM tracking_groups WHERE path = '1.2.3'")->fetchColumn();
+    $parentId = (int) $phase4Pdo->query("SELECT id FROM tracking_groups WHERE path = '1.2.2'")->fetchColumn();
     $children = tracking_create_split($phase4Pdo, $parentId);
-    expect_same(['1.2.3.1', '1.2.3.2', '1.2.3.3'], array_column($children, 'path'));
+    expect_same(['1.2.2.1', '1.2.2.2'], array_column($children, 'path'));
     foreach ($children as $child) {
         tracking_save_group_mappings($phase4Pdo, (int) $child['id'], [[
             'source_host' => 'origin.example.invalid',
@@ -181,7 +181,7 @@ test_case('an already nested leaf can be split again without code changes', func
         ]]);
     }
     tracking_activate_split($phase4Pdo, $parentId);
-    expect_same(3, count(tracking_children($phase4Pdo, $parentId)));
+    expect_same(2, count(tracking_children($phase4Pdo, $parentId)));
 });
 
 test_case('tracking modes validate enforced mappings and preserve explicit mode values', function () use ($phase4Pdo): void {

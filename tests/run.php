@@ -521,6 +521,7 @@ require __DIR__ . '/admin_workflow.php';
 require __DIR__ . '/mapping_json.php';
 require __DIR__ . '/subscription_metadata.php';
 require __DIR__ . '/flexible_splits.php';
+require __DIR__ . '/binary_splits.php';
 require __DIR__ . '/schema_v4.php';
 require __DIR__ . '/tracking_ui.php';
 

@@ -6,14 +6,14 @@ declare(strict_types=1);
 function schema_v3_fixture(): PDO
 {
     [$db, $parent] = flexible_split_fixture();
-    tracking_create_split($db, $parent, 3);
+    historical_split_fixture($db, $parent, 3);
     flexible_fill_children($db, $parent);
-    tracking_activate_split($db, $parent);
+    historical_activate_fixture($db, $parent);
     $nested = (int) tracking_children($db, $parent)[1]['id'];
-    tracking_create_split($db, $nested, 3);
+    historical_split_fixture($db, $nested, 3);
     flexible_fill_children($db, $nested);
-    tracking_activate_split($db, $nested);
-    $pending = tracking_create_split($db, 3, 3);
+    historical_activate_fixture($db, $nested);
+    $pending = historical_split_fixture($db, 3, 3);
     tracking_save_group_targets($db, (int) $pending[0]['id'], [['source_host' => 'na001.example.com', 'target_host' => 'draft.example.com']]);
     $db->exec("UPDATE tracking_groups SET status = 'ARCHIVED' WHERE id = " . (int) $pending[2]['id']);
     tracking_record_transform_event($db, $nested, 'preflight', 'URI', 'SUCCESS');

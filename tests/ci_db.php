@@ -112,6 +112,33 @@ switch ($command) {
     case 'assignment-digest':
         echo hash('sha256', json_encode($pdo->query('SELECT * FROM tracking_assignments ORDER BY token_hash')->fetchAll(), JSON_THROW_ON_ERROR)), "\n";
         exit(0);
+    case 'branch-assignment-digest':
+        $query = $pdo->prepare('WITH RECURSIVE branch(id) AS (SELECT id FROM tracking_groups WHERE id=:id '
+            . 'UNION SELECT g.id FROM tracking_groups g JOIN branch b ON g.parent_id=b.id) '
+            . 'SELECT * FROM tracking_assignments WHERE group_id NOT IN (SELECT id FROM branch) ORDER BY token_hash');
+        $query->execute([':id' => (int) ($argv[2] ?? 0)]);
+        echo hash('sha256', json_encode($query->fetchAll(), JSON_THROW_ON_ERROR)), "\n";
+        exit(0);
+    case 'assert-assigned-to':
+        if (tracking_assignment_for_hash($pdo, token_hash_value((string) $argv[2])) !== (int) $argv[3]) {
+            throw new RuntimeException('Token did not return to its direct parent');
+        }
+        break;
+    case 'assert-binary-history':
+        $parent = (int) ($argv[2] ?? 0);
+        $children = tracking_children($pdo, $parent, 'ARCHIVED');
+        if (count($children) < 2 || (int) $pdo->query('PRAGMA user_version')->fetchColumn() !== 4
+            || $pdo->query('PRAGMA foreign_key_check')->fetchAll() !== []
+            || $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok']) {
+            throw new RuntimeException('Binary split history or SQLite integrity check failed');
+        }
+        foreach ($children as $child) {
+            if (tracking_group_mappings($pdo, (int) $child['id']) === []) throw new RuntimeException('Archived mappings were deleted');
+            $query = $pdo->prepare('SELECT COUNT(*) FROM tracking_assignments WHERE group_id=:id');
+            $query->execute([':id' => (int) $child['id']]);
+            if ((int) $query->fetchColumn() !== 0) throw new RuntimeException('Archived child still holds assignments');
+        }
+        break;
     case 'assert-mapping':
         $statement = $pdo->prepare('SELECT source_host, target_host FROM tracking_entry_mappings WHERE group_id = :id');
         $statement->execute([':id' => (int) ($argv[2] ?? 0)]);

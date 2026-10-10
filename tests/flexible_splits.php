@@ -26,19 +26,52 @@ function flexible_assignments(PDO $db): array
     return $db->query('SELECT * FROM tracking_assignments ORDER BY token_hash')->fetchAll();
 }
 
+/** Test-only import of a split created by the previous N=2..20 release.
+ * Never use the new creation/activation API to construct historical data.
+ */
+function historical_split_fixture(PDO $db, int $parent, int $count): array
+{
+    $path = tracking_group($db, $parent)['path'];
+    $insert = $db->prepare("INSERT INTO tracking_groups (parent_id,child_no,path,status,created_at,updated_at) VALUES (:parent,:no,:path,'DRAFT',1,1)");
+    $mapping = $db->prepare('INSERT INTO tracking_entry_mappings (group_id,source_host,target_host,created_at,updated_at) VALUES (:id,:source,NULL,1,1)');
+    foreach (range(1, $count) as $no) {
+        $insert->execute([':parent' => $parent, ':no' => $no, ':path' => $path . '.' . $no]);
+        $id = (int) $db->lastInsertId();
+        foreach (tracking_group_mappings($db, $parent) as $row) $mapping->execute([':id' => $id, ':source' => $row['source_host']]);
+    }
+    return tracking_children($db, $parent, 'DRAFT');
+}
+function historical_activate_fixture(PDO $db, int $parent): int
+{
+    $children = tracking_children($db, $parent, 'DRAFT');
+    $statement = $db->prepare("UPDATE tracking_groups SET status='ACTIVE' WHERE parent_id=:parent AND status='DRAFT'");
+    $statement->execute([':parent' => $parent]);
+    $move = $db->prepare('UPDATE tracking_assignments SET group_id=:child WHERE token_hash=:hash');
+    $moved = 0;
+    foreach (flexible_assignments($db) as $row) {
+        if ((int) $row['group_id'] !== $parent) continue;
+        $no = tracking_child_number($row['token_hash'], $parent, count($children));
+        $move->execute([':child' => (int) $children[$no - 1]['id'], ':hash' => $row['token_hash']]);
+        $moved++;
+    }
+    $db->exec('UPDATE tracking_groups SET split_at=1 WHERE id=' . $parent);
+    return $moved;
+}
+
 foreach ([2, 3, 4, 20] as $count) {
-    test_case('Create and activate ' . $count . ' children without moving other branches', function () use ($count): void {
+    test_case(($count === 2 ? 'New binary split' : 'Historical ACTIVE ' . $count . '-child split') . ' keeps other branches unchanged', function () use ($count): void {
         [$db, $parent] = flexible_split_fixture();
         $before = flexible_assignments($db);
-        $children = tracking_create_split($db, $parent, $count);
+        $children = $count === 2 ? tracking_create_split($db, $parent) : historical_split_fixture($db, $parent, $count);
         expect_same($count, count($children));
         expect_same(range(1, $count), array_map('intval', array_column($children, 'child_no')));
         expect_same(array_map(fn ($i) => '1.' . $i, range(1, $count)), array_column($children, 'path'));
         expect_same($before, flexible_assignments($db));
         flexible_fill_children($db, $parent);
-        expect_same($count, count(tracking_validate_split($db, $parent)));
+        if ($count === 2) expect_same(2, count(tracking_validate_split($db, $parent)));
+        else expect_exception(fn () => tracking_validate_split($db, $parent), DomainException::class);
         $expectedMoved = count(array_filter($before, fn ($row) => (int) $row['group_id'] === $parent));
-        expect_same($expectedMoved, tracking_activate_split($db, $parent));
+        expect_same($expectedMoved, $count === 2 ? tracking_activate_split($db, $parent) : historical_activate_fixture($db, $parent));
         $after = array_column(flexible_assignments($db), null, 'token_hash');
         foreach ($before as $row) {
             if ((int) $row['group_id'] === $parent) {
@@ -52,7 +85,7 @@ foreach ([2, 3, 4, 20] as $count) {
         expect_exception(fn () => tracking_delete_draft_group($db, (int) $children[0]['id']), DomainException::class);
     });
 }
-foreach ([1, 21, 0, -1, 3.5, '4', true, null] as $index => $count) {
+foreach ([1, 21, 0, -1, 3.5, '4', true, null, 3, 4, 20, '2', 2.0] as $index => $count) {
     test_case('Backend rejects invalid child_count ' . $index, function () use ($count): void {
         expect_exception(fn () => validate_tracking_child_count($count), InvalidArgumentException::class);
         if (is_int($count)) {
@@ -86,12 +119,13 @@ foreach ([2, 4, 5, 20] as $count) {
         expect_true($different);
     });
 }
-test_case('Recursive splits support 2 then 4 then 5 children with independent parent counts', function (): void {
+test_case('Runtime supports binary then historical 4 and 5 children with independent counts', function (): void {
     [$db, $parent] = flexible_split_fixture();
     foreach ([2, 4, 5] as $count) {
-        $children = tracking_create_split($db, $parent, $count);
+        $children = $count === 2 ? tracking_create_split($db, $parent) : historical_split_fixture($db, $parent, $count);
         flexible_fill_children($db, $parent);
-        tracking_activate_split($db, $parent);
+        if ($count === 2) tracking_activate_split($db, $parent);
+        else historical_activate_fixture($db, $parent);
         expect_same($count, count(tracking_children($db, $parent)));
         $parent = (int) $children[$count === 4 ? 2 : 1]['id'];
     }
@@ -106,7 +140,7 @@ test_case('Recursive splits support 2 then 4 then 5 children with independent pa
 foreach ([0, 1, 3] as $deletedIndex) {
     test_case('Delete DRAFT index ' . $deletedIndex . ' renumbers paths and preserves mappings and assignments', function () use ($deletedIndex): void {
         [$db, $parent] = flexible_split_fixture();
-        $children = tracking_create_split($db, $parent, 4);
+        $children = historical_split_fixture($db, $parent, 4);
         flexible_fill_children($db, $parent);
         $before = flexible_assignments($db);
         $maps = [];
@@ -124,7 +158,7 @@ foreach ([0, 1, 3] as $deletedIndex) {
 }
 test_case('Cancel pending split preserves parent mappings all assignments and other branches', function (): void {
     [$db, $parent] = flexible_split_fixture();
-    $children = tracking_create_split($db, $parent, 4);
+    $children = historical_split_fixture($db, $parent, 4);
     flexible_fill_children($db, $parent);
     $other = (int) tracking_active_leaves($db)[1]['id'];
     tracking_create_split($db, $other, 2);
@@ -140,7 +174,7 @@ test_case('Cancel pending split preserves parent mappings all assignments and ot
     expect_same($before, flexible_assignments($db));
     expect_same($otherBefore, tracking_children($db, $other, 'DRAFT'));
     expect_true(tracking_group_is_active_leaf($db, $parent));
-    expect_same(5, count(tracking_create_split($db, $parent, 5)));
+    expect_same(2, count(tracking_create_split($db, $parent)));
 });
 foreach (['ACTIVE', 'ARCHIVED', 'assignment', 'child'] as $reason) {
     test_case('Unsafe DRAFT deletion is rejected for ' . $reason, function () use ($reason): void {
@@ -176,9 +210,9 @@ test_case('One remaining DRAFT cannot activate and deleting the last allows recr
     expect_same(2, count(tracking_create_split($db, $parent, 2)));
 });
 foreach (['empty target', 'missing source', 'non-contiguous'] as $reason) {
-    test_case('Dynamic split activation still rejects ' . $reason, function () use ($reason): void {
+    test_case('Binary split activation still rejects ' . $reason, function () use ($reason): void {
         [$db, $parent] = flexible_split_fixture();
-        $children = tracking_create_split($db, $parent, 4);
+        $children = tracking_create_split($db, $parent);
         if ($reason !== 'empty target') flexible_fill_children($db, $parent);
         $id = (int) $children[0]['id'];
         if ($reason === 'missing source') $db->exec('DELETE FROM tracking_entry_mappings WHERE group_id = ' . $id);
@@ -208,7 +242,7 @@ foreach (['one child', 'gap'] as $reason) {
 }
 test_case('Source discovery reaches all dynamically sized pending children after deletion', function (): void {
     [$db, $parent] = flexible_split_fixture();
-    $children = tracking_create_split($db, $parent, 4);
+    $children = historical_split_fixture($db, $parent, 4);
     tracking_delete_draft_group($db, (int) $children[1]['id']);
     tracking_sync_source_hosts($db, ['new.example.com']);
     foreach (array_merge(tracking_active_leaves($db), tracking_children($db, $parent, 'DRAFT')) as $group) {

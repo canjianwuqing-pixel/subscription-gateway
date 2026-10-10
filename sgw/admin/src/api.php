@@ -710,7 +710,7 @@ function handle_api(string $route, string $method): never
         if (preg_match('#^/api/tracking/groups/(\d+)/split$#D', $route, $match) && $method === 'POST') {
             require_csrf();
             $body = json_request_body();
-            $count = validate_tracking_child_count(array_key_exists('child_count', $body) ? $body['child_count'] : 3);
+            $count = validate_tracking_child_count(array_key_exists('child_count', $body) ? $body['child_count'] : 2);
             send_json(['ok' => true, 'children' => tracking_create_split($pdo, (int) $match[1], $count)]);
         }
         if (preg_match('#^/api/tracking/groups/(\d+)$#D', $route, $match) && $method === 'DELETE') {
@@ -730,6 +730,10 @@ function handle_api(string $route, string $method): never
         if (preg_match('#^/api/tracking/groups/(\d+)/activate-split$#D', $route, $match) && $method === 'POST') {
             require_csrf();
             send_json(['ok' => true, 'moved' => tracking_activate_split($pdo, (int) $match[1])]);
+        }
+        if (preg_match('#^/api/tracking/groups/(\d+)/undo-split$#D', $route, $match) && $method === 'POST') {
+            require_csrf();
+            send_json(['ok' => true, 'moved' => tracking_undo_split($pdo, (int) $match[1])]);
         }
         if ($route === '/api/gateway/status' && $method === 'GET') {
             send_json(['ok' => true, 'publish' => gateway_publish_status($pdo)]);
