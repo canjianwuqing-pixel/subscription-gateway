@@ -42,6 +42,9 @@ jobs:
       - name: Exercise first installation and safe resume without live ACME
         shell: bash
         run: sudo bash tests/install_fake.sh
+      - name: Regress update source permissions with real Git and private umask
+        shell: bash
+        run: sudo bash tests/update_permissions.sh
       - name: Build and exercise real Docker/Nginx stack
         shell: bash
         run: bash tests/ci_docker.sh

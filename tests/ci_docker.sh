@@ -8,6 +8,7 @@ runtime=$sgw/runtime
 env_file=$sgw/.env
 temporary=$(mktemp -d)
 mock_id=
+source_context_restricted=no
 
 compose() { docker compose --project-directory "$sgw" -f "$sgw/docker-compose.yml" "$@"; }
 fail() { printf 'CI Docker test failed: %s\n' "$1" >&2; exit 1; }
@@ -23,6 +24,10 @@ cleanup() {
     fi
     if [[ -f $env_file ]]; then
         compose down -v || status=1
+    fi
+    if [[ $source_context_restricted == yes ]]; then
+        find "$sgw/admin/src" -type d -exec chmod 0755 {} + || status=1
+        find "$sgw/admin/src" -type f -name '*.php' -exec chmod 0644 {} + || status=1
     fi
     if [[ $temporary == /tmp/* && -d $temporary && ! -L $temporary ]]; then
         rm -rf -- "$temporary"
@@ -89,11 +94,44 @@ chmod 0600 "$env_file"
 unset hmac encryption
 
 compose config --quiet
+# Reproduce the old restrictive Git checkout in the real Docker build context.
+source_context_restricted=yes
+find "$sgw/admin/src" -type f -name '*.php' -exec chmod 0600 {} +
+find "$sgw/admin/src" -type d -exec chmod 0700 {} +
+[[ $(stat -c %a "$sgw/admin/src/tracking.php") == 600 ]] || fail 'restrictive source fixture was not created'
 compose build gateway admin
+find "$sgw/admin/src" -type d -exec chmod 0755 {} +
+find "$sgw/admin/src" -type f -name '*.php' -exec chmod 0644 {} +
+source_context_restricted=no
+compose run --rm --no-deps -T --entrypoint su-exec admin www-data php -r '
+    foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator("/app/src", FilesystemIterator::SKIP_DOTS)) as $file) {
+        if ($file->getExtension() !== "php") continue;
+        if (!$file->isReadable() || $file->isWritable() || ($file->getPerms() & 0777) !== 0644 || $file->getOwner() !== 0) exit(1);
+    }
+    foreach (["tracking.php", "api.php", "dashboard.php"] as $name) {
+        if (!is_readable("/app/src/" . $name)) exit(1);
+        echo $name, " root:root 0644 readable, not writable by www-data\n";
+    }
+    require_once "/app/src/tracking.php";
+    require_once "/app/src/api.php";
+    require_once "/app/src/subscription_transform.php";
+    echo "PASS: restrictive 0600 build context yields readable 0644 PHP and working www-data require chains\n";
+' || fail 'Admin image PHP permissions or www-data require chain failed'
 compose run --rm --no-deps -T --entrypoint su-exec admin \
     www-data php /app/src/cli.php migrate >/dev/null
 printf '%s' "$admin_password" | compose run --rm --no-deps -T --entrypoint su-exec admin \
     www-data php /app/src/cli.php init-admin ci_admin >/dev/null
+
+# Exercise the exact updater helper/CLI backup chain using the newly built image.
+(. "$root/sgw/ops.sh"; admin_cli backup /backups/ci-permission.db) >/dev/null \
+    || fail 'admin_cli backup failed in the new image'
+compose run --rm --no-deps -T --entrypoint su-exec admin www-data php -r '
+    $backup = new PDO("sqlite:/backups/ci-permission.db");
+    if ($backup->query("PRAGMA integrity_check")->fetchColumn() !== "ok"
+        || (int) $backup->query("SELECT COUNT(*) FROM admins")->fetchColumn() !== 1) exit(1);
+' || fail 'new-image SQLite safe backup did not contain an intact database'
+sudo chmod 0600 "$runtime/backups/database/ci-permission.db"
+printf 'PASS: new-image admin_cli backup as www-data and SQLite backup integrity\n'
 
 compose up -d
 healthy() {

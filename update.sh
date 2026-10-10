@@ -64,9 +64,15 @@ rollback() {
     compose up -d >/dev/null 2>&1 || true
     warning 'Rollback attempted; run ./setup.sh --check before accepting traffic'
 }
-trap 'rollback' ERR
+trap 'update_status=$?; trap - ERR; rollback; exit "$update_status"' ERR
 
-if [[ ${1:-} == --pull ]]; then git -C "$ROOT_DIR" pull --ff-only; fi
+if [[ ${1:-} == --pull ]]; then
+    (
+        umask 022
+        git -C "$ROOT_DIR" pull --ff-only
+    )
+fi
+(prepare_admin_source_permissions "$ROOT_DIR")
 compose config >/dev/null
 compose build
 admin_cli migrate >/dev/null

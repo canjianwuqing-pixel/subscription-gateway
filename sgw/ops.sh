@@ -19,6 +19,50 @@ install_packages_if_approved() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null || die 'apt install failed'
 }
 compose() { docker compose --project-directory "$SGW_DIR" -f "$COMPOSE_FILE" "$@"; }
+
+# Normalize only tracked application PHP, never runtime data or untracked files.
+# Archive installations are checked instead; image construction also fixes modes.
+prepare_admin_source_permissions() {
+    local repository=$1 source_root=$1/sgw/admin/src entry mode path directory
+    local -a entries=()
+    [[ -d $source_root && ! -L $repository/sgw && ! -L $repository/sgw/admin && ! -L $source_root ]] \
+        || die 'Unsafe Admin source directory'
+    if git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$repository" ls-files --error-unmatch -- 'sgw/admin/src/*.php' >/dev/null \
+            || die 'Cannot inspect tracked Admin PHP sources before build'
+        mapfile -d '' -t entries < <(git -C "$repository" ls-files --stage -z -- 'sgw/admin/src/*.php')
+        (( ${#entries[@]} > 0 )) || die 'No tracked Admin PHP sources found before build'
+        for entry in "${entries[@]}"; do
+            mode=${entry%% *}
+            path=$repository/${entry#*$'\t'}
+            [[ $mode == 100644 || $mode == 100755 ]] && [[ -f $path && ! -L $path ]] \
+                || die "Unsafe tracked Admin PHP source: $path"
+            # Validate every parent before chmod, so symlinks cannot escape src.
+            directory=${path%/*}
+            while [[ $directory == "$source_root" || $directory == "$source_root/"* ]]; do
+                [[ -d $directory && ! -L $directory ]] || die "Unsafe Admin source directory: $directory"
+                [[ $directory != "$source_root" ]] || break
+                directory=${directory%/*}
+            done
+            directory=${path%/*}
+            while [[ $directory == "$source_root" || $directory == "$source_root/"* ]]; do
+                chmod 0755 "$directory" || die "Cannot make Admin source directory traversable: $directory"
+                [[ $directory != "$source_root" ]] || break
+                directory=${directory%/*}
+            done
+            if [[ $mode == 100755 ]]; then mode=0755; else mode=0644; fi
+            chmod "$mode" "$path" || die "Cannot make Admin PHP source readable before build: $path"
+        done
+    else
+        # Do not broaden unknown/untracked file permissions in archive checkouts.
+        entry=$(find "$source_root" \( -type l -o \( -type d ! -perm -0005 \) \
+            -o \( -type f -name '*.php' ! -perm -0004 \) \) -print -quit) \
+            || die 'Cannot inspect Admin source permissions before build'
+        [[ -z $entry ]] \
+            || die 'Admin PHP sources must be readable and source directories traversable before build'
+    fi
+}
+
 env_value() {
     local key=$1
     [[ -f $ENV_FILE ]] || return 1
