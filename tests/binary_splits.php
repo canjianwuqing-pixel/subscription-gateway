@@ -48,7 +48,7 @@ test_case('v4 initialization does not change existing root groups or assignments
     [$db] = flexible_split_fixture();
     $before = binary_snapshot($db);
     initialize_database($db);
-    expect_same(6, (int) $db->query('PRAGMA user_version')->fetchColumn());
+    expect_same(7, (int) $db->query('PRAGMA user_version')->fetchColumn());
     expect_same($before, binary_snapshot($db));
     expect_same(['1', '2', '3'], array_column(tracking_children($db, 1), 'path'));
 });
@@ -126,7 +126,7 @@ $undoChecks = [
         }
     },
     'keeps schema and foreign-key integrity intact' => function ($db): void {
-        expect_same(6, (int) $db->query('PRAGMA user_version')->fetchColumn());
+        expect_same(7, (int) $db->query('PRAGMA user_version')->fetchColumn());
         expect_same([], $db->query('PRAGMA foreign_key_check')->fetchAll());
         expect_same(['ok'], $db->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN));
     },

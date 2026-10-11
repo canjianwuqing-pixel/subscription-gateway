@@ -157,7 +157,7 @@ test_case('empty database initialization creates core and tracking tables', func
     );
     $statement->execute();
     $tables = array_column($statement->fetchAll(), 'name');
-    expect_same(['access_logs', 'admins', 'ip_rules', 'settings', 'tokens', 'tracking_assignments',
+    expect_same(['access_logs', 'admins', 'certificate_jobs', 'cloudflare_credentials', 'gateway_domains', 'ip_rules', 'settings', 'tokens', 'tracking_assignments',
         'tracking_entry_mappings', 'tracking_groups', 'tracking_source_snapshots', 'tracking_sources',
         'tracking_transform_events', 'ua_rules'], $tables);
 });
