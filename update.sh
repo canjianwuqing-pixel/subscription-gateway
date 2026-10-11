@@ -32,12 +32,39 @@ old_admin=$(compose ps -q admin)
 [[ -n $old_gateway && -n $old_admin ]] || die 'Both services must be running before update'
 gateway_image=$(docker inspect --format '{{.Image}}' "$old_gateway")
 admin_image=$(docker inspect --format '{{.Image}}' "$old_admin")
+[[ ! -L $RUNTIME/control && ! -L $RUNTIME/domain-certs ]] || die 'Unsafe domain runtime path'
+mkdir -p "$RUNTIME/control"
+[[ ! -L $RUNTIME/control/certificate-maintenance ]] || die 'Unsafe maintenance marker'
+printf 'updating\n' > "$RUNTIME/control/certificate-maintenance"
+chmod 0640 "$RUNTIME/control/certificate-maintenance"
+trap 'backup_status=$?; if (( backup_status != 0 )); then rm -f -- "$RUNTIME/control/certificate-maintenance"; compose up -d admin >/dev/null 2>&1 || true; fi' EXIT
+compose stop admin >/dev/null
+[[ ! -L $RUNTIME/control && ! -L $RUNTIME/domain-certs ]] || die 'Unsafe domain runtime path'
+mkdir -p "$RUNTIME/control" "$RUNTIME/domain-certs"
+chown 82:82 "$RUNTIME/control" "$RUNTIME/domain-certs"
+chmod 0750 "$RUNTIME/control" "$RUNTIME/domain-certs"
+for file in domains.conf domains.conf.bak; do
+    [[ ! -L $RUNTIME/control/$file ]] || die 'Unsafe domain configuration'
+    [[ ! -f $RUNTIME/control/$file ]] || cp -p -- "$RUNTIME/control/$file" "$backup/$file"
+done
+: > "$backup/domain-cert-targets"
+for domain_directory in "$RUNTIME/domain-certs/"[0-9]*; do
+    [[ -d $domain_directory && ! -L $domain_directory ]] || continue
+    domain_id=${domain_directory##*/}
+    [[ $domain_id =~ ^[1-9][0-9]*$ ]] || die 'Invalid certificate domain ID'
+    if [[ -L $domain_directory/active ]]; then
+        target=$(readlink "$domain_directory/active")
+        [[ $target =~ ^releases/[0-9a-f]{32}$ && ! -L $domain_directory/releases && ! -L $domain_directory/$target ]] || die 'Unsafe alias certificate target'
+        printf '%s %s\n' "$domain_id" "$target" >> "$backup/domain-cert-targets"
+    fi
+done
 printf '%s\n' "$gateway_image" > "$backup/gateway-image-id"
 printf '%s\n' "$admin_image" > "$backup/admin-image-id"
 admin_cli backup "/backups/update-$stamp.db" >/dev/null || die 'SQLite safe backup failed'
 mv -f -- "$RUNTIME/backups/database/update-$stamp.db" "$backup/database.db"
 chown root:root "$backup/database.db"
 chmod 0600 "$backup/database.db"
+trap - EXIT
 
 rollback() {
     set +e
@@ -52,6 +79,18 @@ rollback() {
     chown 82:82 "$RUNTIME/data/subscription-gateway.db"
     chmod 0640 "$RUNTIME/data/subscription-gateway.db"
     if [[ -f $backup/rules.conf ]]; then cp -p -- "$backup/rules.conf" "$RUNTIME/generated/rules.conf"; fi
+    for file in domains.conf domains.conf.bak; do
+        if [[ -f $backup/$file ]]; then cp -p -- "$backup/$file" "$RUNTIME/control/$file";
+        else rm -f -- "$RUNTIME/control/$file"; fi
+    done
+    rm -f -- "$RUNTIME/control/domain-request.json" "$RUNTIME/control/domain-result.json" "$RUNTIME/control/domain-candidate.conf"
+    while read -r domain_id target; do
+        [[ $domain_id =~ ^[1-9][0-9]*$ && $target =~ ^releases/[0-9a-f]{32}$ ]] || continue
+        domain_directory=$RUNTIME/domain-certs/$domain_id
+        [[ -d $domain_directory/$target && ! -L $domain_directory && ! -L $domain_directory/releases && ! -L $domain_directory/$target && ! -L $domain_directory/active.next ]] || continue
+        ln -s "$target" "$domain_directory/active.next"
+        mv -Tf -- "$domain_directory/active.next" "$domain_directory/active"
+    done < "$backup/domain-cert-targets"
     if [[ -f $backup/cert-target ]]; then
         ln -s "$(<"$backup/cert-target")" "$RUNTIME/ssl/active.next"
         mv -Tf -- "$RUNTIME/ssl/active.next" "$RUNTIME/ssl/active"
@@ -61,6 +100,7 @@ rollback() {
     if [[ $pull_mode == --pull && -n $old_commit ]]; then
         git -C "$ROOT_DIR" switch --detach "$old_commit" >/dev/null 2>&1 || true
     fi
+    rm -f -- "$RUNTIME/control/certificate-maintenance"
     compose up -d >/dev/null 2>&1 || true
     warning 'Rollback attempted; run ./setup.sh --check before accepting traffic'
 }
@@ -89,6 +129,7 @@ read -r configured active <<< "$versions"
 compose exec -T gateway nginx -t >/dev/null
 compose exec -T admin nginx -t >/dev/null
 trap - ERR
+rm -f -- "$RUNTIME/control/certificate-maintenance"
 info "Update complete; backup kept at $backup"
 
 # Keep the latest five update snapshots; never prune unrelated backup files.

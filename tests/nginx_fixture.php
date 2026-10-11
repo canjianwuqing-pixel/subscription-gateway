@@ -54,6 +54,8 @@ file_put_contents($directory . '/generated/rules.conf', $rules);
 file_put_contents($directory . '/generated/real_ip.conf',
     "set_real_ip_from 192.0.2.0/24;\nreal_ip_header X-Forwarded-For;\nreal_ip_recursive on;\n");
 $config = (string) file_get_contents(dirname(__DIR__) . '/sgw/gateway/nginx.conf');
+$config = str_replace('include /etc/nginx/gateway-locations.conf;', (string)file_get_contents(dirname(__DIR__).'/sgw/gateway/gateway-locations.conf'), $config);
+$config = str_replace('include /control/domains.conf;', '# fixture has no aliases', $config);
 $config = str_replace([
     '/run/nginx.pid',
     '/var/log/nginx/error.log',
@@ -84,6 +86,7 @@ $config = str_replace([
 file_put_contents($directory . '/nginx.conf', $config);
 // The Admin TLS configuration is checked separately with the same temporary certificate.
 $admin = (string) file_get_contents(dirname(__DIR__) . '/sgw/admin/nginx.conf');
+$admin = str_replace(['__GATEWAY_DOMAIN__','__GATEWAY_DOMAIN_REGEX__','__ADMIN_PORT__'],['test.example.test','test\\\\.example\\\\.test','64444'],$admin);
 $admin = str_replace([
     '/ssl/active/fullchain.pem',
     '/ssl/active/privkey.pem',

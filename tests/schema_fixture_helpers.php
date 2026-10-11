@@ -2,8 +2,14 @@
 declare(strict_types=1);
 
 /** Test-only downgrade; never run against a deployment database. */
+function schema_remove_v7_fixture(PDO $db): void
+{
+    $db->exec('DROP TABLE IF EXISTS certificate_jobs; DROP TRIGGER IF EXISTS gateway_keep_primary; DROP TABLE IF EXISTS gateway_domains; DROP TABLE IF EXISTS cloudflare_credentials;');
+}
+
 function schema_remove_v5_fixture(PDO $db): void
 {
+    schema_remove_v7_fixture($db);
     $db->exec('DROP TABLE tracking_sources');
     $db->exec('DROP TABLE tracking_source_snapshots');
     foreach (['total_nodes', 'emitted_nodes', 'skipped_nodes'] as $column) {
@@ -15,6 +21,7 @@ function schema_remove_v5_fixture(PDO $db): void
 /** Reconstruct the actual v5 source CHECK for legacy migration tests only. */
 function schema_v5_sources_fixture(PDO $db): void
 {
+    schema_remove_v7_fixture($db);
     $db->exec('PRAGMA foreign_keys=OFF');
     $db->beginTransaction();
     $db->exec(<<<'SQL'

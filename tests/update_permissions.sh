@@ -69,7 +69,7 @@ case $command in
     down) printf 'sensitive-during-rollback\n' > "$state/sensitive-during-rollback";;
     migrate) printf 'new-database\n' > "$repo/sgw/runtime/data/subscription-gateway.db";;
     versions) printf '1 1\n';;
-    config|up|compile|exec) :;;
+    config|up|stop|compile|exec) :;;
     *) exit 1;;
 esac
 SH
@@ -93,7 +93,12 @@ git -C "$UPDATE_TEST_REPO" config user.email permissions@example.invalid
 git -C "$UPDATE_TEST_REPO" config user.name 'Permissions Test'
 
 runtime=$UPDATE_TEST_REPO/sgw/runtime
-mkdir -p "$runtime"/{data,backups/database,generated,ssl/releases/old}
+mkdir -p "$runtime"/{data,backups/database,generated,control,domain-certs/2/releases/00000000000000000000000000000001,ssl/releases/old}
+printf '# old domains\n' > "$runtime/control/domains.conf"
+chmod 0640 "$runtime/control/domains.conf"
+printf 'alias-private-key\n' > "$runtime/domain-certs/2/releases/00000000000000000000000000000001/privkey.pem"
+chmod 0640 "$runtime/domain-certs/2/releases/00000000000000000000000000000001/privkey.pem"
+ln -s releases/00000000000000000000000000000001 "$runtime/domain-certs/2/active"
 chmod 0750 "$runtime" "$runtime/data" "$runtime/backups" "$runtime/backups/database" "$runtime/generated" "$runtime/ssl"
 printf 'test-env\n' > "$UPDATE_TEST_REPO/sgw/.env"
 printf 'old-database\n' > "$runtime/data/subscription-gateway.db"
@@ -204,4 +209,11 @@ expect test "$(stat -c %a "$archive/sgw/admin/src/main.php")" == 600
 chmod 0755 "$archive/sgw/admin/src"
 chmod 0644 "$archive/sgw/admin/src/main.php"
 expect prepare_admin_source_permissions "$archive"
+expect grep -Fq '# old domains' "$runtime/control/domains.conf"
+expect test "$(readlink "$runtime/domain-certs/2/active")" == releases/00000000000000000000000000000001
+expect test "$(stat -c %a "$runtime/domain-certs/2/releases/00000000000000000000000000000001/privkey.pem")" == 640
+expect test ! -f "$runtime/control/certificate-maintenance"
+mapfile -t domain_snapshots < <(find "$runtime/backups" -name domain-cert-targets -type f)
+expect test "${#domain_snapshots[@]}" -gt 0
+expect grep -Fq '2 releases/00000000000000000000000000000001' "${domain_snapshots[0]}"
 printf 'PASS: %s update permission checks (real Git pull under 077, isolated 022, scoped repair and rollback)\n' "$passed"

@@ -50,6 +50,7 @@ validate_install_environment() {
 }
 installation_cleanup() {
     local status=$1
+    unset INSTALL_CF_TOKEN INSTALL_CF_ZONE CF_Token CF_Zone_ID
     trap - EXIT
     # A process rejected by flock must not delete another installer's files.
     if [[ ${INSTALL_LOCK_HELD:-no} == yes ]]; then
@@ -78,6 +79,9 @@ installation_images_ready() {
 }
 installation_extra_checks() {
     local problems=0 service id policy binding mode
+    if compose exec -T admin su-exec www-data php /app/src/cli.php domain-check; then
+        info 'Primary domain, ACTIVE alias certificates/permissions, domains.conf and certificate worker ready'
+    else warning 'Domain/certificate-worker checks failed'; problems=1; fi
     if compose exec -T admin su-exec www-data php /app/src/cli.php installation-check; then
         info 'Current schema, tracking structure, administrator and SQLite integrity valid'
     else

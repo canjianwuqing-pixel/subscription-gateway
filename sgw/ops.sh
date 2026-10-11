@@ -182,11 +182,12 @@ make_runtime() {
     for path in "$RUNTIME" "$RUNTIME/ssl" "$RUNTIME/backups"; do
         [[ ! -L $path ]] || die 'Runtime directory must not be a symbolic link'
     done
-    mkdir -p "$RUNTIME"/{data,control,generated,logs,ssl/staging,ssl/releases,backups/database}
-    for path in "$RUNTIME"/{data,control,generated,logs,ssl,ssl/staging,ssl/releases,backups,backups/database}; do
+    mkdir -p "$RUNTIME"/{data,control,generated,logs,domain-certs,ssl/staging,ssl/releases,backups/database}
+    for path in "$RUNTIME"/{data,control,generated,logs,domain-certs,ssl,ssl/staging,ssl/releases,backups,backups/database}; do
         [[ -d $path && ! -L $path ]] || die 'Unsafe runtime subdirectory'
     done
-    chmod 0750 "$RUNTIME" "$RUNTIME"/{data,control,generated,logs,ssl,ssl/staging,ssl/releases,backups,backups/database}
+    chmod 0750 "$RUNTIME" "$RUNTIME"/{data,control,generated,logs,domain-certs,ssl,ssl/staging,ssl/releases,backups,backups/database}
+    chown 82:82 "$RUNTIME/domain-certs"
     chown 82:82 "$RUNTIME/data" "$RUNTIME/control" "$RUNTIME/backups/database"
     chgrp 82 "$RUNTIME/ssl" "$RUNTIME/ssl/releases"
     chmod 0750 "$RUNTIME/data" "$RUNTIME/control" "$RUNTIME/backups/database"
@@ -298,6 +299,7 @@ acquire_certificate() {
             unset CF_Token CF_Zone_ID token
             die 'Cloudflare DNS-01 issuance failed'
         fi
+        INSTALL_CF_TOKEN=$token INSTALL_CF_ZONE=$zone
         unset CF_Token CF_Zone_ID token
         "$acme" --install-cert -d "$domain" --fullchain-file "$fullchain" --key-file "$key" >/dev/null 2>&1 \
             || die 'Cannot install issued certificate into staging'

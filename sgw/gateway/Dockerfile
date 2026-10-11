@@ -3,6 +3,7 @@ FROM nginx:alpine
 RUN apk add --no-cache bash jq coreutils ca-certificates
 
 COPY nginx.conf /etc/nginx/nginx.conf.template
+COPY gateway-locations.conf /etc/nginx/gateway-locations.conf
 COPY entrypoint.sh watcher.sh /usr/local/bin/
 
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/watcher.sh \

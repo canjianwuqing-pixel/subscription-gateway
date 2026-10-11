@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-const DATABASE_SCHEMA_VERSION = 6;
+const DATABASE_SCHEMA_VERSION = 7;
 const TRACKING_ALGORITHM_VERSION = 1;
 
 function env_required(string $name): string
@@ -484,6 +484,12 @@ SQL);
                 throw new RuntimeException('Database migration integrity check failed');
             }
             $pdo->exec('PRAGMA user_version=6');
+            $version = 6;
+        }
+        if ($version === 6) {
+            require_once __DIR__ . '/domain_schema.php';
+            migrate_domain_schema($pdo);
+            $pdo->exec('PRAGMA user_version=7');
         }
         $pdo->commit();
     } catch (Throwable $error) {

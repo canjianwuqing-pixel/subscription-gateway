@@ -23,7 +23,7 @@ function schema_v6_snapshot(PDO $db): array
 $v5Purge=schema_v5_purge_fixture();$v5PurgeBefore=schema_v6_snapshot($v5Purge);
 test_case('Actual v5 DELETED data upgrades to v6 and initialization is idempotent',function()use($v5Purge):void{
     expect_same(5,(int)$v5Purge->query('PRAGMA user_version')->fetchColumn());initialize_database($v5Purge);
-    expect_same(6,(int)$v5Purge->query('PRAGMA user_version')->fetchColumn());$before=schema_v6_snapshot($v5Purge);initialize_database($v5Purge);expect_same($before,schema_v6_snapshot($v5Purge));
+    expect_same(7,(int)$v5Purge->query('PRAGMA user_version')->fetchColumn());$before=schema_v6_snapshot($v5Purge);initialize_database($v5Purge);expect_same($before,schema_v6_snapshot($v5Purge));
 });
 foreach(['tracking_sources','tracking_entry_mappings']as$table){
     test_case('v6 migration purges old deleted hosts from '.$table.' including all archived targets',function()use($v5Purge,$v5PurgeBefore,$table):void{
@@ -38,7 +38,7 @@ foreach(['tracking_groups','tracking_assignments','tracking_source_snapshots','t
 }
 test_case('Fresh and migrated v6 accept only four source states and pass SQLite integrity',function()use($v5Purge):void{
     [$fresh]=source_fixture();foreach([$fresh,$v5Purge]as$db){
-        expect_same(6,(int)$db->query('PRAGMA user_version')->fetchColumn());expect_same([],$db->query('PRAGMA foreign_key_check')->fetchAll());
+        expect_same(7,(int)$db->query('PRAGMA user_version')->fetchColumn());expect_same([],$db->query('PRAGMA foreign_key_check')->fetchAll());
         expect_same(['ok'],$db->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN));expect_same(1,(int)$db->query('PRAGMA foreign_keys')->fetchColumn());
         expect_exception(fn()=>$db->exec("UPDATE tracking_sources SET state='DELETED'"),PDOException::class);
     }

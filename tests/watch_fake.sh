@@ -72,20 +72,20 @@ watcher_pid=$!
 
 submit() {
     local id=$1 version=$2 text=$3 wrong_hash=${4:-no} sha
-    printf '%s\n' "$text" > "$CONTROL_DIR/candidate.conf.tmp"
-    chmod 0640 "$CONTROL_DIR/candidate.conf.tmp"
-    mv -f "$CONTROL_DIR/candidate.conf.tmp" "$CONTROL_DIR/candidate.conf"
-    sha=$(sha256sum "$CONTROL_DIR/candidate.conf")
+    printf '%s\n' "$text" > "$CONTROL_DIR/${publish_prefix:-}candidate.conf.tmp"
+    chmod 0640 "$CONTROL_DIR/${publish_prefix:-}candidate.conf.tmp"
+    mv -f "$CONTROL_DIR/${publish_prefix:-}candidate.conf.tmp" "$CONTROL_DIR/${publish_prefix:-}candidate.conf"
+    sha=$(sha256sum "$CONTROL_DIR/${publish_prefix:-}candidate.conf")
     sha=${sha%% *}
     [[ $wrong_hash == no ]] || sha=$(printf '0%.0s' {1..64})
     jq -n --arg id "$id" --argjson version "$version" --arg sha256 "$sha" \
-        '{id:$id,version:$version,sha256:$sha256}' > "$CONTROL_DIR/request.json.tmp"
-    chmod 0640 "$CONTROL_DIR/request.json.tmp"
-    mv -f "$CONTROL_DIR/request.json.tmp" "$CONTROL_DIR/request.json"
+        '{id:$id,version:$version,sha256:$sha256}' > "$CONTROL_DIR/${publish_prefix:-}request.json.tmp"
+    chmod 0640 "$CONTROL_DIR/${publish_prefix:-}request.json.tmp"
+    mv -f "$CONTROL_DIR/${publish_prefix:-}request.json.tmp" "$CONTROL_DIR/${publish_prefix:-}request.json"
     local attempt
     for attempt in {1..80}; do
-        if [[ -f $CONTROL_DIR/result.json ]] \
-            && jq -e --arg id "$id" '.id==$id' "$CONTROL_DIR/result.json" >/dev/null 2>&1; then
+        if [[ -f $CONTROL_DIR/${publish_prefix:-}result.json ]] \
+            && jq -e --arg id "$id" '.id==$id' "$CONTROL_DIR/${publish_prefix:-}result.json" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -125,4 +125,27 @@ for attempt in {1..40}; do
 done
 ! grep -Fq 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa TEMP_BLOCKED;' "$GENERATED_DIR/rules.conf"
 
-echo 'PASS: 6 fake watcher scenarios (not an Nginx integration test)'
+# Isolated domain channel reuses the same watcher while rules/active_version remain intact.
+printf '# old aliases\n' > "$CONTROL_DIR/domains.conf"
+chmod 0640 "$CONTROL_DIR/domains.conf"
+printf 'http {\n    include %s/generated/rules.conf;\n    include %s/control/domains.conf;\n}\n' "$test_root" "$test_root" > "$test_root/nginx.conf"
+publish_prefix=domain-
+old_version=$(cat "$CONTROL_DIR/active_version")
+touch "$FAKE_NGINX_STATE/fail_test"
+submit 66666666666666666666666666666666 2 '# candidate aliases'
+jq -e '.ok==false and .error_code=="NGINX_TEST_FAILED"' "$CONTROL_DIR/domain-result.json" >/dev/null
+[[ $(cat "$CONTROL_DIR/domains.conf") == '# old aliases' ]]
+rm "$FAKE_NGINX_STATE/fail_test"
+touch "$FAKE_NGINX_STATE/fail_reload_once"
+submit 77777777777777777777777777777777 2 '# candidate aliases'
+jq -e '.ok==false and .error_code=="RELOAD_FAILED"' "$CONTROL_DIR/domain-result.json" >/dev/null
+[[ $(cat "$CONTROL_DIR/domains.conf") == '# old aliases' ]]
+submit 88888888888888888888888888888888 2 '# good aliases'
+jq -e '.ok==true' "$CONTROL_DIR/domain-result.json" >/dev/null
+[[ $(cat "$CONTROL_DIR/domains.conf") == '# good aliases' ]]
+[[ $(cat "$CONTROL_DIR/active_version") == "$old_version" ]]
+submit 99999999999999999999999999999999 3 '# bad hash' yes
+jq -e '.ok==false and .error_code=="HASH_MISMATCH"' "$CONTROL_DIR/domain-result.json" >/dev/null
+[[ $(cat "$CONTROL_DIR/domains.conf") == '# good aliases' ]]
+[[ -f $CONTROL_DIR/result.json && -f $CONTROL_DIR/request.json && -f $CONTROL_DIR/candidate.conf ]]
+echo 'PASS: 11 fake watcher scenarios (not an Nginx integration test)'

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/publish.php';
+require_once __DIR__ . '/domain_certificates.php';
 require_once __DIR__ . '/analytics.php';
 
 const LOGIN_MAX_FAILURES = 5;
@@ -500,6 +501,26 @@ function handle_api(string $route, string $method): never
         }
 
         require_authentication();
+        if ($route === '/api/domains' && $method === 'GET') {
+            send_json(['ok'=>true,'domains'=>domain_list($pdo),'credentials'=>cloudflare_profiles($pdo)]);
+        }
+        if ($route === '/api/domains' && $method === 'POST') {
+            require_csrf(); $id=domain_add($pdo,json_request_body());
+            send_json(['ok'=>true,'id'=>$id,'status'=>'PENDING'],202);
+        }
+        if (preg_match('#^/api/domains/(\d+)(/retry)?$#D',$route,$match) && ($method === 'DELETE'||($method === 'POST'&&isset($match[2])))) {
+            require_csrf(); domain_action($pdo,(int)$match[1],$method==='DELETE'?'REMOVE':'RETRY');
+            send_json(['ok'=>true,'status'=>$method==='DELETE'?'REMOVING':'PENDING'],202);
+        }
+        if ($route === '/api/cloudflare' && $method === 'GET') send_json(['ok'=>true,'credentials'=>cloudflare_profiles($pdo)]);
+        if ($route === '/api/cloudflare' && $method === 'POST') {
+            require_csrf(); send_json(['ok'=>true,'id'=>cloudflare_save_profile($pdo,json_request_body())]);
+        }
+        if (preg_match('#^/api/cloudflare/(\d+)(/test)?$#D',$route,$match)) {
+            if($method==='POST'&&isset($match[2])) { require_csrf(); send_json(['ok'=>true]+cloudflare_test_profile($pdo,(int)$match[1])); }
+            if($method==='PATCH'&&!isset($match[2])) { require_csrf(); send_json(['ok'=>true,'id'=>cloudflare_save_profile($pdo,json_request_body(),(int)$match[1])]); }
+            if($method==='DELETE'&&!isset($match[2])) { require_csrf(); cloudflare_delete_profile($pdo,(int)$match[1]); send_json(['ok'=>true]); }
+        }
 
         if ($route === '/api/overview' && $method === 'GET') {
             send_json(['ok' => true, 'overview' => overview_data($pdo)]);

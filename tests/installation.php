@@ -12,9 +12,9 @@ function installation_test_database(): PDO
     return $db;
 }
 
-test_case('installation diagnostics accept schema v6, initial off groups and empty upstream', function (): void {
+test_case('installation diagnostics accept schema v7, initial off groups and empty upstream', function (): void {
     $db = installation_test_database();
-    expect_same(['schema' => 6, 'tracking_mode' => 'off', 'upstream' => 'EMPTY'], installation_database_check($db));
+    expect_same(['schema' => 7, 'tracking_mode' => 'off', 'upstream' => 'EMPTY'], installation_database_check($db));
 });
 test_case('installation diagnostics reject old schema without migrating it', function (): void {
     $db = installation_test_database();
@@ -24,9 +24,9 @@ test_case('installation diagnostics reject old schema without migrating it', fun
 });
 test_case('installation diagnostics reject future schema without modifying it', function (): void {
     $db = installation_test_database();
-    $db->exec('PRAGMA user_version=7');
+    $db->exec('PRAGMA user_version=8');
     expect_exception(fn () => installation_database_check($db), RuntimeException::class);
-    expect_same(7, (int) $db->query('PRAGMA user_version')->fetchColumn());
+    expect_same(8, (int) $db->query('PRAGMA user_version')->fetchColumn());
 });
 test_case('installation diagnostics reject invalid tracking mode', function (): void {
     $db = installation_test_database();

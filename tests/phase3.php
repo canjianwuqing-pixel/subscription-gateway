@@ -66,7 +66,7 @@ test_case('duplicate configured Token parameter is rejected while other query ke
 });
 
 test_case('ordinary Gateway log excludes query and separate event log uses configured Token key', function () use ($phase3Pdo, $root): void {
-    $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf');
+    $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf') . file_get_contents($root . '/sgw/gateway/gateway-locations.conf');
     expect_true((bool) preg_match('/log_format gateway escape=json(.*?);/s', $nginx, $match));
     expect_true(str_contains($match[1], '"path":"$uri"'));
     foreach (['$request_uri', '$request', '$args', '$arg_token', '$http_referer'] as $forbidden) {

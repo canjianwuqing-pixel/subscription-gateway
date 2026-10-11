@@ -1,10 +1,19 @@
 import base64
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
 class MockHandler(BaseHTTPRequestHandler):
     def response(self):
+        if self.path.startswith('/cf/zones/'):
+            zone_id = urlparse(self.path).path.split('/')[3]
+            if self.headers.get('Authorization') != 'Bearer known_Cloudflare_secret_DO_NOT_PERSIST_9876':
+                return 403, 'application/json', b'{"success":false}'
+            if '/dns_records' in self.path:
+                return 200, 'application/json', b'{"success":true,"result":[]}'
+            zone_name = 'other.org' if zone_id == 'b' * 32 else 'example.net'
+            return 200, 'application/json', json.dumps({'success': True, 'result': {'id': zone_id, 'name': zone_name}}).encode()
         response_format = parse_qs(urlparse(self.path).query).get("format", [""])[0]
         if response_format in ("sources6", "sources5", "sources-base64", "truncated"):
             count = 5 if response_format == "sources5" else 6

@@ -60,7 +60,7 @@ test_case('Real v3 schema migrates through v4 to v6 and initialization is idempo
     expect_same(3, (int) $schemaV3Pdo->query('PRAGMA user_version')->fetchColumn());
     expect_true(str_contains($schemaV3Pdo->query("SELECT sql FROM sqlite_master WHERE name='tracking_groups'")->fetchColumn(), 'BETWEEN 1 AND 3'));
     initialize_database($schemaV3Pdo);
-    expect_same(6, (int) $schemaV3Pdo->query('PRAGMA user_version')->fetchColumn());
+    expect_same(7, (int) $schemaV3Pdo->query('PRAGMA user_version')->fetchColumn());
     initialize_database($schemaV3Pdo);
 });
 foreach (['id', 'parent_id', 'child_no', 'path', 'status', 'split_at', 'created_at', 'updated_at'] as $column) {
@@ -88,7 +88,7 @@ test_case('v3 migration retains exact root IDs paths and all fixed Token assignm
 });
 test_case('Fresh v4 database allows child_no beyond three and enforces root constraints', function (): void {
     [$db, $parent] = mapping_json_fixture();
-    expect_same(6, (int) $db->query('PRAGMA user_version')->fetchColumn());
+    expect_same(7, (int) $db->query('PRAGMA user_version')->fetchColumn());
     $db->exec("INSERT INTO tracking_groups (parent_id,child_no,path,status,created_at,updated_at) VALUES (2,99,'1.99','DRAFT',1,1)");
     expect_same(99, (int) $db->query("SELECT child_no FROM tracking_groups WHERE path='1.99'")->fetchColumn());
     foreach (["UPDATE tracking_groups SET child_no=1 WHERE path='root'",

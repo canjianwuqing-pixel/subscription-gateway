@@ -47,6 +47,10 @@ if [[ ${1:-} == --driver ]]; then
             ensure_cron() { log cron; inject cron || die 'cron unavailable'; }
             acquire_certificate() {
                 log "certificate $1"
+                if [[ $1 == dns-cf ]]; then
+                    INSTALL_CF_TOKEN=known_Cloudflare_secret_DO_NOT_PERSIST_9876
+                    INSTALL_CF_ZONE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                fi
                 [[ $1 != http-01 || ! -f $state/port80 ]] || die 'Port 80 occupied'
                 cp "$state/cert.pem" "$RUNTIME/ssl/staging/fullchain.pem"
                 cp "$state/key.pem" "$RUNTIME/ssl/staging/privkey.pem"
@@ -81,12 +85,13 @@ if [[ ${1:-} == --driver ]]; then
                 log "cli $*"
                 case $1 in
                     installation-probe) [[ -f $state/images ]];;
+                    cloudflare-bootstrap) sha256sum | cut -d ' ' -f 1 > "$state/cf-profile-hash";;
                     installation-check)
-                        [[ -f $state/schema && $(<"$state/schema") == 6 && -f $state/admin ]] \
+                        [[ -f $state/schema && $(<"$state/schema") == 7 && -f $state/admin ]] \
                             && inject schema && inject extensions && inject tracking;;
                     migrate)
                         inject migrate || return 1
-                        printf '6\n' > "$state/schema"
+                        printf '7\n' > "$state/schema"
                         [[ -f $RUNTIME/data/subscription-gateway.db ]] || printf 'retained tokens/ip/ua/logs/tracking\n' > "$RUNTIME/data/subscription-gateway.db";;
                     admin-status)
                         if [[ -f $state/admin ]]; then printf '1 %s\n' "$(<"$state/admin")"; else printf '0\n'; fi;;
@@ -247,8 +252,8 @@ if [[ $(uname -s) == Linux ]]; then
     expect test "$(stat -c %a "$state/sgw/runtime/install-complete")" == 600
 fi
 pass 'real first_install completes and stores a root-only nonsecret marker'
-expect test "$(<"$state/schema")" == 6
-pass 'fresh migration reaches schema v6 (real SQLite also tested in PHP/Docker)'
+expect test "$(<"$state/schema")" == 7
+pass 'fresh migration reaches schema v7 (real SQLite also tested in PHP/Docker)'
 expect grep -q 'Gateway fail-closed: upstream not configured' "$state/output"
 pass 'empty upstream is accepted as fail-closed'
 expect grep -q 'Existing certificate mode: cron/ACME/port 80 not required' "$state/output"
@@ -485,4 +490,33 @@ expect test ! -f "$state/sgw/runtime/ssl/staging/fullchain.pem"
 expect test -f "$state/sgw/.env"
 pass 'lock-owning failure cleans temporary/invalid staging but preserves durable environment'
 
+if [[ ${1:-} != --ops-only ]]; then
+new_state cf-fresh
+install 2
+expect test -s "$state/cf-profile-hash"
+pass 'fresh DNS-CF initializes a profile through stdin, never argv'
+if grep -RFq known_Cloudflare_secret_DO_NOT_PERSIST_9876 "$state"; then fail 'CF secret persisted in installer mock state'; fi
+pass 'CF install-state/env/commands/logs contain no plaintext token'
+expected_cf_hash=$(printf '%s\n%s\n' known_Cloudflare_secret_DO_NOT_PERSIST_9876 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | sha256sum | cut -d' ' -f1)
+expect test "$(<"$state/cf-profile-hash")" == "$expected_cf_hash"
+pass 'bootstrap receives both CF Token and Zone ID in its stdin payload'
+new_state cf-interrupted
+printf 'migrate\n' > "$state/fail"
+expect_failed install 2
+rm "$state/fail"
+run install
+expect test -f "$state/sgw/runtime/install-complete"
+pass 'interrupted DNS-CF installation safely resumes without original shell token'
+expect grep -q 'Cloudflare凭据档案未初始化' "$state/output"
+expect test ! -f "$state/cf-profile-hash"
+pass 'missing resume token only warns and never prevents completion'
+new_state http-no-profile
+install 1
+expect test ! -f "$state/cf-profile-hash"
+pass 'HTTP-01 installation creates no Cloudflare profile'
+new_state existing-no-profile
+install 3
+expect test ! -f "$state/cf-profile-hash"
+pass 'existing-file installation creates no Cloudflare profile'
+fi
 printf 'PASS: %d installer scenarios (no real ACME, package installation or Docker download)\n' "$passed"

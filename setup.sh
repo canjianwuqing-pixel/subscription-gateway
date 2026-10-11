@@ -169,6 +169,14 @@ EOF
     if ! admin_cli installation-check >/dev/null 2>&1; then
         admin_cli migrate >/dev/null || die 'SQLite initialization failed'
     fi
+    if [[ $mode == dns-cf && $completed != yes ]]; then
+        if [[ -n ${INSTALL_CF_TOKEN:-} && ${INSTALL_CF_ZONE:-} =~ ^[A-Fa-f0-9]{32}$ ]]; then
+            if ! printf '%s\n%s\n' "$INSTALL_CF_TOKEN" "$INSTALL_CF_ZONE" | admin_cli cloudflare-bootstrap >/dev/null; then
+                warning 'Cloudflare凭据档案未初始化，可稍后在后台添加'
+            fi
+        else warning 'Cloudflare凭据档案未初始化，可稍后在后台添加'; fi
+    fi
+    unset INSTALL_CF_TOKEN INSTALL_CF_ZONE
     admin_line=$(admin_cli admin-status) || die 'Cannot read administrator installation state'
     read -r count username <<< "$admin_line"
     if [[ $count == 0 ]]; then
@@ -318,11 +326,13 @@ set_gateway_domain() {
     if ! cert_activate "$next" yes \
         || ! compose up -d --force-recreate admin gateway || ! wait_health \
         || ! compose exec -T gateway nginx -t >/dev/null 2>&1 \
-        || ! compose exec -T admin nginx -t >/dev/null 2>&1; then
+        || ! compose exec -T admin nginx -t >/dev/null 2>&1 \
+        || ! admin_cli sync-primary-domain >/dev/null; then
         cp -p -- "$previous" "$ENV_FILE"
         ln -s "$old_cert" "$RUNTIME/ssl/active.next"
         mv -Tf -- "$RUNTIME/ssl/active.next" "$RUNTIME/ssl/active"
         compose up -d --force-recreate admin gateway >/dev/null 2>&1 || true
+        admin_cli sync-primary-domain >/dev/null 2>&1 || true
         die 'Domain change failed; old environment and certificate restored'
     fi
     if [[ $mode != existing ]] && ! register_acme_hook "$mode" "$next"; then
@@ -330,6 +340,7 @@ set_gateway_domain() {
         ln -s "$old_cert" "$RUNTIME/ssl/active.next"
         mv -Tf -- "$RUNTIME/ssl/active.next" "$RUNTIME/ssl/active"
         compose up -d --force-recreate admin gateway >/dev/null 2>&1 || true
+        admin_cli sync-primary-domain >/dev/null 2>&1 || true
         die 'Renewal registration failed; old domain and certificate restored'
     fi
     info "Gateway domain changed to $next"
@@ -345,7 +356,7 @@ check_install() {
     local domain dir version_line configured active
     domain=$(env_value GATEWAY_DOMAIN)
     valid_domain "$domain" || die 'Invalid gateway domain in .env'
-    for dir in data control generated logs ssl backups; do
+    for dir in data control generated logs domain-certs ssl backups; do
         if [[ -d $RUNTIME/$dir && $(stat -c %a "$RUNTIME/$dir") == 750 ]]; then
             info "runtime/$dir permission 0750"
         else

@@ -4,6 +4,20 @@
 
 ## 状态与安装
 
+### 一实例多入口域名（Schema v7）
+
+首次安装仍只配置主 `GATEWAY_DOMAIN`，主证书继续由宿主机管理 `/runtime/ssl/active`；HTTP-01、Cloudflare DNS-01、existing 模式及原证书命令保持。首次 DNS-CF 安装在 SQLite 就绪后通过 stdin 加密初始化“默认 Cloudflare”凭据；中断恢复时没有原 Token 仅提示稍后在后台添加。
+
+后台“入口域名”可直接填写备用 FQDN、Cloudflare API Token、32 位 Zone ID，或选择已有凭据。后端验证 DNS label 边界和 Zone，最多 100 个备用入口；不修改 A/AAAA/proxied。每个备用域名独立签发 DNS-01 证书，位于 `sgw/runtime/domain-certs/<id>/releases/<release>`，`active` 原子指向版本。Admin 对主证书仍为只读，对备用证书可写；Gateway 对两者均只读。不同账号、不同 Zone 可同时使用。
+
+CF Token 使用 `TOKEN_ENCRYPTION_KEY`、XChaCha20-Poly1305、独立 AAD `subscription-gateway:cloudflare-token:v1` 加密。GET API 只返回已配置/末四位；编辑留空保留旧 Token；被域名引用的凭据不能删除。官方 acme.sh 3.1.1 在镜像构建时校验固定 SHA-256，受限 PHP curl DNS 驱动只操作 ACME TXT，不把 Authorization 送进 shell argv。临时 ACME 配置销毁，仅白名单 CA 账户密钥/注册信息持久化，续签不重复注册账户。
+
+独立 certificate worker 处理 PENDING/RUNNING/RETRY 作业。证书必须 PEM/key 匹配、SAN 覆盖、至少剩余一天，才可发布。`domain-request.json`/`domain-candidate.conf`/`domain-result.json` 独立于规则发布通道，watcher 验证 hash、`nginx -t`、原子替换 `domains.conf`、reload/失败回滚。发布 ACK 后才置 ACTIVE；超时保留 RUNNING 等 ACK，重启可恢复。每天检查，剩余 <=30 天续签；失败从 5 分钟指数退避至最多一天，手动重试立即执行。续签失败恢复旧 active，删除失败恢复原状态；主域名禁止后台删除。
+
+所有入口共用同一份 Gateway location、SQLite、Token hash/分组/assignment、映射与安全规则。备用入口只开放订阅，不开放 Admin；Admin 明确只接受主域名 Host（可带配置的 Admin 端口）。Gateway 重启恢复持久化配置；坏配置优先回退备份，必要时只保留主入口。`setup.sh --check` 检查 PRIMARY 一致、ACTIVE alias 证书/权限、配置及 worker；update 暂停证书任务并备份 SQLite、环境、规则、域名配置和 active 指针，回滚保留旧镜像/证书。
+
+CI 使用注入 mock CF API/ACME runner，但 Gateway、watcher、SQLite、证书文件和多 SNI TLS/reload/rollback 是真实 Docker/Nginx。此测试不代表真实 Let's Encrypt 签发成功；上线前仍须在隔离 VPS 验证真实 DNS 权限、签发和续签。
+
 代码包含正式安装、失败续装、证书、Admin、规则发布和分析实现。CI 验证模拟首次安装/续装和真实 Linux Docker/Nginx；**真实公网 VPS 的 HTTP-01/DNS-01 签发、续期仍需在目标环境验证**。首次使用先在隔离的 Debian/Ubuntu 测试 VPS 验证，不要直接切换生产流量。
 
 将项目上传到 Linux 后，以 root 在项目根目录执行：

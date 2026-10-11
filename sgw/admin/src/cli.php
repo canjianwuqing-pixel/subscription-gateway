@@ -2,6 +2,7 @@
 declare(strict_types=1);
 require_once __DIR__ . '/publish.php';
 require_once __DIR__ . '/installation.php';
+require_once __DIR__ . '/domain_certificates.php';
 
 if (PHP_SAPI !== 'cli') {
     http_response_code(404);
@@ -20,12 +21,26 @@ try {
         echo 'TRANSFORMER_OK', PHP_EOL;
         exit;
     }
-    $readOnly = in_array($command, ['installation-check', 'admin-status', 'integrity', 'versions', 'upstream-state'], true);
+    $readOnly = in_array($command, ['domain-check','installation-check', 'admin-status', 'integrity', 'versions', 'upstream-state'], true);
     if ($readOnly && !is_file((string) app_config()['database_path'])) {
         throw new RuntimeException('Database missing; run the installer to migrate it');
     }
     $pdo = $readOnly ? open_database((string) app_config()['database_path']) : app_db();
-    if ($command === 'migrate') {
+    if ($command === 'cloudflare-bootstrap') {
+        // Two newline-delimited fields via stdin only. Never echo credentials or upstream exceptions.
+        try {
+            $token=rtrim((string)fgets(STDIN,514),"\r\n"); $zone=rtrim((string)fgets(STDIN,64),"\r\n");
+            cloudflare_save_profile($pdo,['name'=>'默认 Cloudflare','token'=>$token,'zone_id'=>$zone]);
+            sodium_memzero($token); echo 'CLOUDFLARE_PROFILE_READY',PHP_EOL;
+        } catch(Throwable) { fwrite(STDERR,"Cloudflare profile initialization failed; add it in Admin later.\n"); exit(1); }
+    } elseif ($command === 'sync-primary-domain') {
+        domain_sync_primary($pdo,env_required('GATEWAY_DOMAIN')); echo 'PRIMARY_SYNCED',PHP_EOL;
+    } elseif ($command === 'domain-check') {
+        $status=domain_installation_check($pdo);
+        $pid=trim((string)@file_get_contents('/run/certificate-worker.pid'));
+        if(!ctype_digit($pid)||!is_dir('/proc/'.$pid)) throw new RuntimeException('Certificate worker unavailable');
+        echo 'DOMAINS_OK schema=',$status['schema'],' active_aliases=',$status['active_aliases'],' worker=ready',PHP_EOL;
+    } elseif ($command === 'migrate') {
         echo 'MIGRATED', PHP_EOL;
     } elseif ($command === 'installation-check') {
         installation_extensions_check();

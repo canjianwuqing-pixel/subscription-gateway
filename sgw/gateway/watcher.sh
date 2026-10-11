@@ -47,7 +47,7 @@ write_test_config() {
     local source=$1 target=$2 line replaced=0
     : > "$target"
     while IFS= read -r line; do
-        if [[ $line == "    include $generated/rules.conf;" ]]; then
+        if [[ $line == "    include $rules;" ]]; then
             printf '    include %s;\n' "$source" >> "$target"
             replaced=1
         else
@@ -110,6 +110,7 @@ process_request() {
         return
     fi
     if ! cp -- "$staging/rules.candidate.conf" "$new_rules" || ! chmod 0640 "$new_rules" \
+        || ! chown --reference="$control" "$new_rules" \
         || ! sync -f "$new_rules" || ! mv -f -- "$new_rules" "$rules"; then
         if restore_previous_rules; then
             fail_request INSTALL_FAILED
@@ -127,8 +128,10 @@ process_request() {
         return
     fi
 
-    printf '%s\n' "$request_version" > "$staging/active_version"
-    write_control_file "$control/active_version" "$staging/active_version" || return 1
+    if [[ $rules == "$generated/rules.conf" ]]; then
+        printf '%s\n' "$request_version" > "$staging/active_version"
+        write_control_file "$control/active_version" "$staging/active_version" || return 1
+    fi
     write_result true OK "$request_id" "$request_version" "$request_sha"
 }
 
@@ -191,8 +194,19 @@ expiry_interval=${TEMP_EXPIRY_INTERVAL_SECONDS:-30}
 [[ $expiry_interval =~ ^[1-9][0-9]?$ ]] || exit 1
 last_expiry_check=0
 last_rotation_check=0
+process_domain_request() {
+    # Same hash/test/atomic reload/rollback engine, isolated files and version channel.
+    request=$control/domain-request.json candidate=$control/domain-candidate.conf
+    result=$control/domain-result.json rules=$control/domains.conf
+    local status=0
+    process_request || status=$?
+    request=$control/request.json candidate=$control/candidate.conf
+    result=$control/result.json rules=$generated/rules.conf
+    return "$status"
+}
 while true; do
     process_request || echo 'Rule publish retry pending' >&2
+    process_domain_request || echo 'Domain publish retry pending' >&2
     now=$(date +%s)
     if (( now - last_expiry_check >= expiry_interval )); then
         last_expiry_check=$now

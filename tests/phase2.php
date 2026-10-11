@@ -108,7 +108,7 @@ test_case('whitelist bypasses Rate only for Token and IP', function () use ($pha
 });
 
 test_case('single-segment subscription route excludes all other paths', function () use ($root): void {
-    $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf');
+    $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf') . file_get_contents($root . '/sgw/gateway/gateway-locations.conf');
     expect_true(str_contains($nginx, 'location / { return 444; }'));
     expect_true((bool) preg_match('/location ~ (\^[^\s]+\$) \{/', $nginx, $match));
     $regex = '#' . str_replace('#', '\\#', $match[1]) . '#';
@@ -126,7 +126,7 @@ test_case('missing and malformed Tokens are 400 before proxy', function () use (
     expect_true(str_contains($rules, 'map $arg_token $token_valid'));
     expect_same(0, preg_match('/^[0-9a-f]{32}$/', ''));
     expect_same(0, preg_match('/^[0-9a-f]{32}$/', 'NOT_A_VALID_TOKEN'));
-    $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf');
+    $nginx = (string) file_get_contents($root . '/sgw/gateway/nginx.conf') . file_get_contents($root . '/sgw/gateway/gateway-locations.conf');
     expect_true(strpos($nginx, 'if ($token_valid = 0) { return 400; }') < strpos($nginx, 'proxy_pass $gateway_subscription_upstream$request_uri;'));
 });
 

@@ -66,4 +66,12 @@ assert.ok(script.includes('mappings:inputs.map(')); passed++;
 assert.ok(script.includes('各组映射将被清理')); passed++;
 assert.ok(script.includes('作为新入口重新加入，target为空')); passed++;
 assert.ok(script.includes('历史及备用映射保持原样')); passed++;
-console.log(`PASS: ${passed} tracking UI JavaScript checks`);
+for(const text of ['入口域名','检测并申请证书','Cloudflare API Token','留空保留原值','新建 Cloudflare 凭据','domainPoll=setTimeout','cloudflare/','domains/']){
+    assert.ok(script.includes(text));passed++;
+}
+vm.runInContext(script.slice(script.indexOf('function domainStatus('),script.indexOf('function cfFields(')),context);
+assert.equal(context.domainStatus({status:'PENDING'}),'正在申请证书…');passed++;
+assert.equal(context.domainStatus({status:'ACTIVE'}),'正常');passed++;
+assert.equal(context.domainStatus({status:'ERROR'}),'证书申请失败');passed++;
+assert.equal(context.domainStatus({status:'REMOVING'}),'正在删除…');passed++;
+console.log(`PASS: ${passed} tracking/domain UI JavaScript checks`);

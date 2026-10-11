@@ -17,6 +17,7 @@ services:
       - ./runtime/generated:/etc/nginx/generated
       - ./runtime/logs:/var/log/nginx
       - ./runtime/ssl:/ssl:ro
+      - ./runtime/domain-certs:/domain-certs:ro
     depends_on:
       - admin
     healthcheck:
@@ -39,6 +40,7 @@ services:
       - ./runtime/data:/data
       - ./runtime/logs:/var/log/subscription-gateway:ro
       - ./runtime/ssl:/ssl:ro
+      - ./runtime/domain-certs:/domain-certs
       - ./runtime/backups/database:/backups
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]

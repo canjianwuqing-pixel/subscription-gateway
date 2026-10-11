@@ -47,7 +47,9 @@ done
 docker version
 docker compose version
 
-mkdir -p "$runtime"/{data,control,generated,logs,ssl/releases/ci,backups/database}
+mkdir -p "$runtime"/{data,control,generated,logs,domain-certs,ssl/releases/ci,backups/database}
+sudo chown 82:82 "$runtime/domain-certs"
+chmod 0750 "$runtime/domain-certs"
 chmod 0750 "$runtime" "$runtime"/{data,control,generated,logs,ssl,ssl/releases,ssl/releases/ci,backups,backups/database}
 sudo chown 82:82 "$runtime/data" "$runtime/control" "$runtime/backups/database"
 sudo chgrp 82 "$runtime/logs" "$runtime/ssl" "$runtime/ssl/releases" "$runtime/ssl/releases/ci"
@@ -75,6 +77,9 @@ GATEWAY_HTTPS_PORT=18443
 ADMIN_BIND=127.0.0.1
 ADMIN_PORT=16444
 CERT_MODE=existing
+SGW_CERT_TEST_MODE=1
+SGW_CF_TEST_URL=http://mock.gateway.test:8080/cf
+SGW_ACME_TEST_RUNNER=/tmp/ci_acme_runner.sh
 APP_UID=82
 APP_GID=82
 TZ=UTC
@@ -176,6 +181,8 @@ docker exec "$mock_id" python -c \
     >/dev/null || fail 'Mock upstream did not start'
 
 docker cp "$root/tests/ci_db.php" "$(compose ps -q admin):/tmp/ci_db.php"
+docker cp "$root/tests/ci_acme_runner.sh" "$(compose ps -q admin):/tmp/ci_acme_runner.sh"
+compose exec -T admin chmod 0755 /tmp/ci_acme_runner.sh
 db() { compose exec -T admin su-exec www-data php /tmp/ci_db.php "$@" >/dev/null; }
 publish() {
     local configured active
@@ -241,10 +248,10 @@ done
 
 # Real TLS Admin requests exercise the actual session/authentication/API boundary.
 admin_cookie=$temporary/admin-cookie
-admin_url=https://127.0.0.1:16444/$admin_path
+admin_url=https://gateway.test:16444/$admin_path
 admin_request() {
     admin_code=$(curl --silent --show-error --insecure --noproxy '*' \
-        --cookie "$admin_cookie" --cookie-jar "$admin_cookie" \
+        --resolve gateway.test:16444:127.0.0.1 --cookie "$admin_cookie" --cookie-jar "$admin_cookie" \
         --output "$temporary/admin-response" --write-out '%{http_code}' "$admin_url/$1" "${@:2}")
 }
 for endpoint in api/tokens api/analysis/tokens api/logs api/tokens/1/full api/tokens/1/detail; do
@@ -900,6 +907,7 @@ jq -e '.tracking.source_stats.current==5 and any(.tracking.sources[]; .source_ho
     || fail 'source lifecycle or filtering changed Token assignments'
 db tracking-mode off
 publish
+. "$root/tests/ci_domains.sh"
 unset admin_csrf
 printf 'PASS: real HTTP source add/rename/physical purge/auth/CSRF, relearn NULL targets, 6-to-5 lifecycle, partial URI/Base64/YAML, safe references, all-filtered 503, failed/HEAD snapshots and unchanged assignments\n'
 printf 'PASS: real Linux Docker, Nginx, mock upstream, rules, expiry, logs and permissions\n'

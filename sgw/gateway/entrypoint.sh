@@ -109,6 +109,20 @@ RULES
     mv -f "$rules.tmp" "$rules"
     echo 'No active rules; gateway started in fail-closed mode.' >&2
 fi
+domains=/control/domains.conf
+[[ ! -L $domains ]] || { echo 'Unsafe domains configuration' >&2; exit 1; }
+if [[ ! -f $domains ]]; then
+    printf '# No aliases configured.\n' > "$domains"
+    chown --reference=/control "$domains"
+    chmod 0640 "$domains"
+fi
+if ! nginx -t >/dev/null 2>&1; then
+    # Alias corruption must not take down the host-managed primary. Prefer last known good.
+    cp -- "$domains" /tmp/subscription-gateway/startup-domains.bad
+    if [[ -f $domains.bak && ! -L $domains.bak ]]; then cp -- "$domains.bak" "$domains"; fi
+    if ! nginx -t >/dev/null 2>&1; then printf '# Alias startup recovery: primary remains available.\n' > "$domains"; fi
+    chown --reference=/control "$domains"; chmod 0640 "$domains"
+fi
 if ! nginx -t; then
     if [[ -f $rules.bak && ! -L $rules.bak ]]; then
         cp -- "$rules.bak" "$rules.restore"

@@ -17,7 +17,7 @@ $v4Fixture=schema_v4_fixture();$v4Before=[];
 foreach(['tracking_groups','tracking_assignments','tracking_entry_mappings','tracking_transform_events','tokens','access_logs','ip_rules','ua_rules','settings','admins']as$table)$v4Before[$table]=$v4Fixture->query('SELECT * FROM '.$table.' ORDER BY 1')->fetchAll();
 test_case('Actual v4 schema upgrades atomically through v5 to v6 and remains idempotent',function()use($v4Fixture):void{
     expect_same(4,(int)$v4Fixture->query('PRAGMA user_version')->fetchColumn());initialize_database($v4Fixture);
-    expect_same(6,(int)$v4Fixture->query('PRAGMA user_version')->fetchColumn());$before=source_state_snapshot($v4Fixture);initialize_database($v4Fixture);expect_same($before,source_state_snapshot($v4Fixture));
+    expect_same(7,(int)$v4Fixture->query('PRAGMA user_version')->fetchColumn());$before=source_state_snapshot($v4Fixture);initialize_database($v4Fixture);expect_same($before,source_state_snapshot($v4Fixture));
 });
 foreach(array_keys($v4Before)as$table){
     test_case('v4 to v5 preserves every original row and column of '.$table,function()use($v4Fixture,$v4Before,$table):void{
@@ -39,7 +39,7 @@ test_case('v5 event node counts initialize to zero without rewriting legacy even
     foreach($v4Fixture->query('SELECT total_nodes,emitted_nodes,skipped_nodes FROM tracking_transform_events')as$row)expect_same(['total_nodes'=>0,'emitted_nodes'=>0,'skipped_nodes'=>0],$row);
 });
 test_case('Fresh and migrated v5 pass foreign keys and integrity checks',function()use($v4Fixture):void{
-    [$fresh]=source_fixture();foreach([$fresh,$v4Fixture]as$db){expect_same(6,(int)$db->query('PRAGMA user_version')->fetchColumn());expect_same(1,(int)$db->query('PRAGMA foreign_keys')->fetchColumn());expect_same([],$db->query('PRAGMA foreign_key_check')->fetchAll());expect_same(['ok'],$db->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN));}
+    [$fresh]=source_fixture();foreach([$fresh,$v4Fixture]as$db){expect_same(7,(int)$db->query('PRAGMA user_version')->fetchColumn());expect_same(1,(int)$db->query('PRAGMA foreign_keys')->fetchColumn());expect_same([],$db->query('PRAGMA foreign_key_check')->fetchAll());expect_same(['ok'],$db->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN));}
 });
 foreach(['catalog conflict','event column conflict','orphan assignment']as$reason){
     test_case('v5 migration failure '.$reason.' rolls back all schema and original data',function()use($reason):void{

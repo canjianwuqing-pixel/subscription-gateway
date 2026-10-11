@@ -366,7 +366,7 @@ test_case('v2 database migrates to v4 without changing core data', function () u
     $old->exec("DELETE FROM settings WHERE key IN ('tracking_mode','tracking_algorithm_version')");
     $old->exec('PRAGMA user_version=2');
     initialize_database($old);
-    expect_same(6, (int) $old->query('PRAGMA user_version')->fetchColumn());
+    expect_same(7, (int) $old->query('PRAGMA user_version')->fetchColumn());
     expect_same(1, (int) $old->query('SELECT COUNT(*) FROM admins WHERE username = \'migration_admin\'')->fetchColumn());
     expect_same('BLOCKED', (string) $old->query('SELECT state FROM tokens WHERE id = ' . $tokenId)->fetchColumn());
     expect_same(1, (int) $old->query('SELECT COUNT(*) FROM ip_rules')->fetchColumn());

@@ -21,7 +21,7 @@ $basePath = '/' . app_config()['admin_secret_path'];
 const base=<?= json_encode($basePath, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT) ?>;
 const csrf=document.querySelector('meta[name="csrf-token"]').content;
 const content=document.getElementById('content'),msg=document.getElementById('message');
-const pages=['概览','分析','日志','Token','入口追踪','IP规则','UA规则','设置'];
+const pages=['概览','分析','日志','Token','入口追踪','入口域名','IP规则','UA规则','设置'];
 let tokenGroupFilter='',currentPage='概览';
 const stateLabels={NORMAL:'正常',WHITELIST:'白名单',BLOCKED:'永久封禁',TEMP_BLOCKED:'临时封禁',BLACKLIST:'黑名单',ACTIVE:'已启用',DRAFT:'待配置',ARCHIVED:'已归档',off:'关闭',preflight:'预检模式',enforced:'正式模式'};
 const decisionLabels={PASS:'正常放行',TOKEN_BLOCKED:'Token黑名单',TOKEN_TEMP_BLOCKED:'Token临时封禁',IP_BLACKLIST:'IP黑名单',TOKEN_WHITELIST:'Token白名单',IP_WHITELIST:'IP白名单',UA_WHITELIST:'UA白名单',UA_BLACKLIST:'UA黑名单',RATE_LIMIT:'请求限速'};
@@ -138,9 +138,51 @@ async function trackingPage(){
         add(actions,btn('查看Token',()=>{tokenGroupFilter=String(g.id);show('Token')}));const state=g.status==='ACTIVE'?(g.has_active_children?'已拆分':g.has_draft_children?'待激活':'已启用'):stateLabels[g.status]||'其他状态',mapping=trackingMappingState(g),path=node('span',g.path,'group-path');path.style.paddingLeft=Math.max(0,g.path.split('.').length-1)*16+'px';return[path,state,g.token_count,g.mapping_count,node('span',mapping.text,mapping.className),fmtTime(g.created_at),fmtTime(trackingSplitTime(g)),actions]
     })))
 }
+let domainPoll;
+function domainStatus(row){return {PENDING:'正在申请证书…',ACTIVE:'正常',ERROR:'证书申请失败',REMOVING:'正在删除…'}[row.status]||row.status}
+function cfFields(body,profile={}){
+    const [ln,name]=field('凭据名称',profile.name||''),[lt,token]=field(profile.id?'API Token（留空保留原值）':'Cloudflare API Token','','password'),[lz,zone]=field('Cloudflare Zone ID',profile.zone_id||'');
+    token.autocomplete='new-password';token.maxLength=512;zone.required=true;zone.pattern='[a-fA-F0-9]{32}';zone.maxLength=32;
+    if(!profile.id)token.required=true;body.append(ln,lt,lz);
+    return ()=>({name:name.value,token:token.value,zone_id:zone.value});
+}
+async function editCloudflare(profile={}){
+    let values;
+    const saved=await ask({title:profile.id?'修改 Cloudflare 凭据':'添加 Cloudflare 凭据',description:'Token 加密保存，不会返回浏览器。修改不会立即重签现有证书。',build:body=>{values=cfFields(body,profile)},submit:async()=>api(profile.id?'cloudflare/'+profile.id:'cloudflare',profile.id?'PATCH':'POST',values()),label:'检测并保存'});
+    if(saved)await show('入口域名');
+}
+async function addDomain(profiles){
+    let domain,choice,values;
+    const saved=await ask({title:'添加备用入口域名',description:'仅申请该域名的独立 DNS-01 证书。请自行配置 A/AAAA 指向此网关；本功能不会修改业务 DNS。',label:'检测并申请证书',build:body=>{
+        const [label,input]=field('备用域名');domain=input;domain.required=true;domain.maxLength=253;
+        choice=options([['new','新建 Cloudflare 凭据'],...profiles.map(p=>[String(p.id),p.name+' · '+p.zone_name])]);
+        const fresh=node('div','','box');values=cfFields(fresh);body.append(label,add(node('label','Cloudflare 凭据'),choice),fresh);
+        choice.onchange=()=>{fresh.hidden=choice.value!=='new';fresh.querySelectorAll('input').forEach(i=>i.disabled=fresh.hidden)};
+    },submit:async()=>api('domains','POST',{fqdn:domain.value,...(choice.value==='new'?values():{credential_id:Number(choice.value)})})});
+    if(saved){await show('入口域名');notice('申请任务已创建，正在申请证书…')}
+}
+async function domainPage(){
+    clearTimeout(domainPoll);
+    const data=await api('domains');if(currentPage!=='入口域名')return;
+    content.append(node('h3','入口域名管理'),btn('+ 添加备用域名',()=>addDomain(data.credentials),'primary'),node('p','所有入口共用 Token、分组、映射、风控和上游。主域名与证书仍通过 setup.sh 管理。'));
+    content.append(table(['域名','类型','状态','证书到期','Cloudflare','详情','操作'],data.domains.map(row=>{
+        const actions=node('div','','actions');
+        if(row.role==='ALIAS'&&!['PENDING','REMOVING'].includes(row.status)){
+            actions.append(btn(row.status==='ERROR'?'重试':'重新申请证书',async()=>{await api('domains/'+row.id+'/retry','POST');await show('入口域名')}));
+            actions.append(btn('删除',async()=>{const yes=await ask({title:'删除备用入口',description:row.fqdn+'：Gateway 确认移除后才会删除证书；失败保留旧入口。',danger:true});if(yes){await api('domains/'+row.id,'DELETE');await show('入口域名')}},'danger'));
+        }
+        return [row.fqdn,row.role==='PRIMARY'?'主域名':'备用域名',domainStatus(row),fmtTime(row.expires_at),row.credential_name||'宿主机管理',row.last_error||'—',actions];
+    })));
+    content.append(node('h3','Cloudflare 凭据管理'),btn('+ 添加凭据',()=>editCloudflare()),table(['名称','Zone','Zone ID','Token','最近测试','操作'],data.credentials.map(p=>[
+        p.name,p.zone_name,p.zone_id,'已配置 · …'+p.token_last4,p.last_error||(p.last_test_ok?'凭据正常':'未测试'),add(node('div','','actions'),
+        btn('测试',async()=>{const r=await api('cloudflare/'+p.id+'/test','POST');await show('入口域名');notice(r.tested?'凭据正常 · Zone：'+r.zone_name:r.error,!r.tested)}),
+        btn('修改',()=>editCloudflare(p)),btn('删除',async()=>{const yes=await ask({title:'删除 Cloudflare 凭据',description:p.name+'：正在被入口域名使用的凭据不能删除。',danger:true});if(yes){await api('cloudflare/'+p.id,'DELETE');await show('入口域名')}},'danger'))
+    ])));
+    domainPoll=setTimeout(()=>{if(currentPage==='入口域名'&&!document.getElementById('modal').open)show('入口域名');else if(currentPage==='入口域名')domainPoll=setTimeout(()=>show('入口域名'),3000)},3000);
+}
 async function settings(){
     const[gateway,rates,summary]=await Promise.all([api('settings/gateway'),api('settings'),api('overview')]),g=gateway.settings,s=rates.settings,o=summary.overview,box=node('div','','box');box.append(node('div','部署配置（只读）：入口 '+(o.gateway_domain||'—')+' · 后台端口 '+(o.admin_port||'—')+' · 后台路径 '+base+' · 证书到期 '+fmtTime(o.certificate_expires_at)+' · 可信代理 '+(o.trusted_proxy_ips||'未配置'),'muted'));const bar=node('div','','formrow'),[lu,upstream]=field('上游代理地址',g.upstream_url),[lk,key]=field('Token GET 参数名',g.token_query_key),[lr,rate]=field('每分钟请求',s.rate_per_minute,'number'),[lb,burst]=field('突发请求余量',s.rate_burst,'number'),[ld,days]=field('日志保留天数',s.log_retention_days,'number'),enabled=node('input');upstream.style.width='320px';enabled.type='checkbox';enabled.checked=s.rate_enabled;add(bar,lu,lk,node('span','订阅路径：'+g.subscribe_path_template),node('span','Token 格式：32位小写十六进制'));add(bar,add(node('label','开启限速 '),enabled),lr,lb,ld);box.append(bar,btn('保存网关设置',async()=>publishNotice(await api('settings/gateway','PATCH',{upstream_url:upstream.value,subscribe_path_template:g.subscribe_path_template,token_query_key:key.value,token_format_profile:g.token_format_profile}))),btn('保存限速',async()=>publishNotice(await api('settings/rate','PATCH',{rate_enabled:enabled.checked,rate_per_minute:Number(rate.value),rate_burst:Number(burst.value)}))),btn('保存保留天数',async()=>{await api('settings/retention','PATCH',{log_retention_days:Number(days.value)});notice('日志保留天数已保存')}));content.append(box);
     const passwordBox=node('div','','box'),[lc,current]=field('当前密码','','password'),[ln,replacement]=field('新密码（至少6位）','','password');current.autocomplete='current-password';replacement.autocomplete='new-password';replacement.maxLength=1024;passwordBox.append(node('strong','修改管理员密码'));add(passwordBox,lc,ln,btn('修改密码',async()=>{await api('admin/password','PATCH',{current_password:current.value,new_password:replacement.value});current.value='';replacement.value='';notice('密码已更新，其他登录会话已失效')}));content.append(passwordBox)
 }
-const render={'概览':overview,'分析':analysis,'日志':logs,'Token':tokenPage,'入口追踪':trackingPage,'IP规则':()=>rules('IP规则'),'UA规则':()=>rules('UA规则'),'设置':settings};pages.forEach(p=>document.getElementById('menu').append(btn(p,()=>show(p))));document.getElementById('logout').onclick=()=>api('logout','POST').then(()=>location.replace(base+'/')).catch(e=>notice(errorText(e),true));document.getElementById('close-detail').onclick=()=>document.getElementById('detail').close();document.getElementById('identity').textContent=<?= json_encode((string) $_SESSION['admin_username'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT) ?>;show('概览');
+const render={'概览':overview,'分析':analysis,'日志':logs,'Token':tokenPage,'入口追踪':trackingPage,'入口域名':domainPage,'IP规则':()=>rules('IP规则'),'UA规则':()=>rules('UA规则'),'设置':settings};pages.forEach(p=>document.getElementById('menu').append(btn(p,()=>show(p))));document.getElementById('logout').onclick=()=>api('logout','POST').then(()=>location.replace(base+'/')).catch(e=>notice(errorText(e),true));document.getElementById('close-detail').onclick=()=>document.getElementById('detail').close();document.getElementById('identity').textContent=<?= json_encode((string) $_SESSION['admin_username'], JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT) ?>;show('概览');
 </script></body></html>

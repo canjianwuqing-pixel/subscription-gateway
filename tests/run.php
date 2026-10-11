@@ -11,6 +11,7 @@ mkdir($dataDirectory, 0700, true);
 mkdir($sessionDirectory, 0700, true);
 mkdir($rateDirectory, 0700, true);
 
+putenv('GATEWAY_DOMAIN=gateway.test');
 putenv('DATABASE_PATH=' . $dataDirectory . DIRECTORY_SEPARATOR . 'main.db');
 putenv('ADMIN_SECRET_PATH=test_secret_path_123456');
 putenv('SESSION_NAME=subscription_gateway_test');
@@ -161,12 +162,13 @@ test_case('empty database initialization creates core and tracking tables', func
         'tracking_transform_events', 'ua_rules'], $tables);
 });
 
-test_case('user_version is six and initialization is idempotent', function () use ($pdo): void {
-    expect_same(6, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
+test_case('user_version is seven and initialization is idempotent', function () use ($pdo): void {
+    expect_same(7, (int) $pdo->query('PRAGMA user_version')->fetchColumn());
     setting_set($pdo, 'idempotence_probe', 'preserved');
     initialize_database($pdo);
     expect_same('preserved', setting_get($pdo, 'idempotence_probe'));
 });
+require __DIR__ . '/domains.php';
 
 test_case('SQLite runtime PRAGMAs are enabled', function () use ($pdo): void {
     expect_same('wal', strtolower((string) $pdo->query('PRAGMA journal_mode')->fetchColumn()));
