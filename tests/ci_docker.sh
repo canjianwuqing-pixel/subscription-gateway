@@ -49,7 +49,7 @@ docker compose version
 
 mkdir -p "$runtime"/{data,control,generated,logs,domain-certs,ssl/releases/ci,backups/database}
 sudo chown 82:82 "$runtime/domain-certs"
-chmod 0750 "$runtime/domain-certs"
+sudo chmod 0750 "$runtime/domain-certs"
 chmod 0750 "$runtime" "$runtime"/{data,control,generated,logs,ssl,ssl/releases,ssl/releases/ci,backups,backups/database}
 sudo chown 82:82 "$runtime/data" "$runtime/control" "$runtime/backups/database"
 sudo chgrp 82 "$runtime/logs" "$runtime/ssl" "$runtime/ssl/releases" "$runtime/ssl/releases/ci"
