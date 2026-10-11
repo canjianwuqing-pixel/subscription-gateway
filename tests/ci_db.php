@@ -128,7 +128,7 @@ switch ($command) {
     case 'assert-binary-history':
         $parent = (int) ($argv[2] ?? 0);
         $children = tracking_children($pdo, $parent, 'ARCHIVED');
-        if (count($children) < 2 || (int) $pdo->query('PRAGMA user_version')->fetchColumn() !== 6
+        if (count($children) < 2 || (int) $pdo->query('PRAGMA user_version')->fetchColumn() !== DATABASE_SCHEMA_VERSION
             || $pdo->query('PRAGMA foreign_key_check')->fetchAll() !== []
             || $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok']) {
             throw new RuntimeException('Binary split history or SQLite integrity check failed');

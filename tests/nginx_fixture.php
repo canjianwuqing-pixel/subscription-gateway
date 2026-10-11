@@ -18,6 +18,7 @@ $mime = str_replace('\\', '/', realpath($argv[2]));
 mkdir($directory . '/generated', 0700);
 mkdir($directory . '/logs', 0700);
 $pdo = open_database($directory . '/fixture.db');
+putenv('GATEWAY_DOMAIN=test.example.test');
 initialize_database($pdo);
 setting_set($pdo, 'upstream_url', 'http://127.0.0.1:12345');
 save_token($pdo, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'BLOCKED');
