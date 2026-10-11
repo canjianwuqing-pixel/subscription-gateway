@@ -38,7 +38,7 @@ function statusText(v){const n=Number(v),label=httpLabels[n]||(n>=500?'服务异
 function decisionView(code){const el=node('span',decisionLabels[code]||'其他处理结果');el.title=code||'无处理记录';return el}
 function stateView(code){const el=node('span',stateLabels[code]||'其他状态');el.title=code;return el}
 async function api(path,method='GET',data){const r=await fetch(base+'/api/'+path,{method,credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:data===undefined?undefined:JSON.stringify(data)});let value;try{value=await r.json()}catch{throw Error('服务器响应异常，请稍后重试')}if(!r.ok||!value.ok)throw Error(value.error||'请求失败');return value}
-async function show(page){currentPage=page;document.getElementById('title').textContent=page;content.replaceChildren();msg.textContent='';document.querySelectorAll('#menu button').forEach(b=>b.classList.toggle('active',b.textContent===page));try{await render[page]()}catch(e){notice(errorText(e),true)}}
+async function show(page){stopDomainPolling();const view=domainView;currentPage=page;document.getElementById('title').textContent=page;content.replaceChildren();msg.textContent='';document.querySelectorAll('#menu button').forEach(b=>b.classList.toggle('active',b.textContent===page));try{await render[page]()}catch(e){if(view===domainView)notice(errorText(e),true)}}
 function fmtTime(v){return v?new Date(Number(v)*1000).toLocaleString():'—'}
 function publishNotice(x){notice(x.publish?.applied===true?'已保存，网关规则已应用':'已保存，网关规则应用待确认')}
 
@@ -138,7 +138,28 @@ async function trackingPage(){
         add(actions,btn('查看Token',()=>{tokenGroupFilter=String(g.id);show('Token')}));const state=g.status==='ACTIVE'?(g.has_active_children?'已拆分':g.has_draft_children?'待激活':'已启用'):stateLabels[g.status]||'其他状态',mapping=trackingMappingState(g),path=node('span',g.path,'group-path');path.style.paddingLeft=Math.max(0,g.path.split('.').length-1)*16+'px';return[path,state,g.token_count,g.mapping_count,node('span',mapping.text,mapping.className),fmtTime(g.created_at),fmtTime(trackingSplitTime(g)),actions]
     })))
 }
-let domainPoll;
+let domainPoll,domainView=0;
+function stopDomainPolling(){clearTimeout(domainPoll);domainPoll=undefined;domainView++}
+function domainNeedsPolling(data){return data.domains.some(row=>row.role==='ALIAS'&&['PENDING','REMOVING'].includes(row.status))}
+function domainViewActive(view,container){return currentPage==='入口域名'&&view===domainView&&container.isConnected}
+function scheduleDomainPoll(data,container,view){
+    if(!domainViewActive(view,container))return;
+    clearTimeout(domainPoll);domainPoll=undefined;
+    if(domainNeedsPolling(data))domainPoll=setTimeout(()=>pollDomainTable(data,container,view),3000);
+}
+async function pollDomainTable(previous,container,view){
+    if(!domainViewActive(view,container))return;
+    domainPoll=undefined;
+    if(document.getElementById('modal').open){scheduleDomainPoll(previous,container,view);return}
+    let next=previous;
+    try{
+        const data=await api('domains');
+        if(!domainViewActive(view,container))return;
+        // A dialog may have opened while the request was in flight. Refresh only after it closes.
+        if(!document.getElementById('modal').open){renderDomainTable(data,container);next=data}
+    }catch{/* Keep the current table/message and retry only while a known task is pending. */}
+    scheduleDomainPoll(next,container,view);
+}
 function domainStatus(row){return {PENDING:'正在申请证书…',ACTIVE:'正常',ERROR:'证书申请失败',REMOVING:'正在删除…'}[row.status]||row.status}
 function cfFields(body,profile={}){
     const [ln,name]=field('凭据名称',profile.name||''),[lt,token]=field(profile.id?'API Token（留空保留原值）':'Cloudflare API Token','','password'),[lz,zone]=field('Cloudflare Zone ID',profile.zone_id||'');
@@ -161,24 +182,32 @@ async function addDomain(profiles){
     },submit:async()=>api('domains','POST',{fqdn:domain.value,...(choice.value==='new'?values():{credential_id:Number(choice.value)})})});
     if(saved){await show('入口域名');notice('申请任务已创建，正在申请证书…')}
 }
-async function domainPage(){
-    clearTimeout(domainPoll);
-    const data=await api('domains');if(currentPage!=='入口域名')return;
-    content.append(node('h3','入口域名管理'),btn('+ 添加备用域名',()=>addDomain(data.credentials),'primary'),node('p','所有入口共用 Token、分组、映射、风控和上游。主域名与证书仍通过 setup.sh 管理。'));
-    content.append(table(['域名','类型','状态','证书到期','Cloudflare','详情','操作'],data.domains.map(row=>{
+function renderDomainTable(data,domainTableContainer){
+    const previous=domainTableContainer.firstElementChild,scrollTop=previous?.scrollTop||0,scrollLeft=previous?.scrollLeft||0,x=window.scrollX,y=window.scrollY;
+    // Retain the table's footprint during automatic removal so the credentials below do not jump upward.
+    domainTableContainer.style.minHeight=domainTableContainer.offsetHeight+'px';
+    const domainTable=table(['域名','类型','状态','证书到期','Cloudflare','详情','操作'],data.domains.map(row=>{
         const actions=node('div','','actions');
         if(row.role==='ALIAS'&&!['PENDING','REMOVING'].includes(row.status)){
             actions.append(btn(row.status==='ERROR'?'重试':'重新申请证书',async()=>{await api('domains/'+row.id+'/retry','POST');await show('入口域名')}));
             actions.append(btn('删除',async()=>{const yes=await ask({title:'删除备用入口',description:row.fqdn+'：Gateway 确认移除后才会删除证书；失败保留旧入口。',danger:true});if(yes){await api('domains/'+row.id,'DELETE');await show('入口域名')}},'danger'));
         }
         return [row.fqdn,row.role==='PRIMARY'?'主域名':'备用域名',domainStatus(row),fmtTime(row.expires_at),row.credential_name||'宿主机管理',row.last_error||'—',actions];
-    })));
+    }));
+    domainTableContainer.replaceChildren(domainTable);domainTable.scrollTop=scrollTop;domainTable.scrollLeft=scrollLeft;
+    if(window.scrollX!==x||window.scrollY!==y)window.scrollTo(x,y);
+}
+async function domainPage(){
+    const view=domainView,data=await api('domains');if(currentPage!=='入口域名'||view!==domainView)return;
+    const domainTableContainer=node('div');domainTableContainer.id='domain-table';
+    content.append(node('h3','入口域名管理'),btn('+ 添加备用域名',()=>addDomain(data.credentials),'primary'),node('p','所有入口共用 Token、分组、映射、风控和上游。主域名与证书仍通过 setup.sh 管理。'),domainTableContainer);
+    renderDomainTable(data,domainTableContainer);
     content.append(node('h3','Cloudflare 凭据管理'),btn('+ 添加凭据',()=>editCloudflare()),table(['名称','Zone','Zone ID','Token','最近测试','操作'],data.credentials.map(p=>[
         p.name,p.zone_name,p.zone_id,'已配置 · …'+p.token_last4,p.last_error||(p.last_test_ok?'凭据正常':'未测试'),add(node('div','','actions'),
         btn('测试',async()=>{const r=await api('cloudflare/'+p.id+'/test','POST');await show('入口域名');notice(r.tested?'凭据正常 · Zone：'+r.zone_name:r.error,!r.tested)}),
         btn('修改',()=>editCloudflare(p)),btn('删除',async()=>{const yes=await ask({title:'删除 Cloudflare 凭据',description:p.name+'：正在被入口域名使用的凭据不能删除。',danger:true});if(yes){await api('cloudflare/'+p.id,'DELETE');await show('入口域名')}},'danger'))
     ])));
-    domainPoll=setTimeout(()=>{if(currentPage==='入口域名'&&!document.getElementById('modal').open)show('入口域名');else if(currentPage==='入口域名')domainPoll=setTimeout(()=>show('入口域名'),3000)},3000);
+    scheduleDomainPoll(data,domainTableContainer,view);
 }
 async function settings(){
     const[gateway,rates,summary]=await Promise.all([api('settings/gateway'),api('settings'),api('overview')]),g=gateway.settings,s=rates.settings,o=summary.overview,box=node('div','','box');box.append(node('div','部署配置（只读）：入口 '+(o.gateway_domain||'—')+' · 后台端口 '+(o.admin_port||'—')+' · 后台路径 '+base+' · 证书到期 '+fmtTime(o.certificate_expires_at)+' · 可信代理 '+(o.trusted_proxy_ips||'未配置'),'muted'));const bar=node('div','','formrow'),[lu,upstream]=field('上游代理地址',g.upstream_url),[lk,key]=field('Token GET 参数名',g.token_query_key),[lr,rate]=field('每分钟请求',s.rate_per_minute,'number'),[lb,burst]=field('突发请求余量',s.rate_burst,'number'),[ld,days]=field('日志保留天数',s.log_retention_days,'number'),enabled=node('input');upstream.style.width='320px';enabled.type='checkbox';enabled.checked=s.rate_enabled;add(bar,lu,lk,node('span','订阅路径：'+g.subscribe_path_template),node('span','Token 格式：32位小写十六进制'));add(bar,add(node('label','开启限速 '),enabled),lr,lb,ld);box.append(bar,btn('保存网关设置',async()=>publishNotice(await api('settings/gateway','PATCH',{upstream_url:upstream.value,subscribe_path_template:g.subscribe_path_template,token_query_key:key.value,token_format_profile:g.token_format_profile}))),btn('保存限速',async()=>publishNotice(await api('settings/rate','PATCH',{rate_enabled:enabled.checked,rate_per_minute:Number(rate.value),rate_burst:Number(burst.value)}))),btn('保存保留天数',async()=>{await api('settings/retention','PATCH',{log_retention_days:Number(days.value)});notice('日志保留天数已保存')}));content.append(box);

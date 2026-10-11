@@ -74,4 +74,123 @@ assert.equal(context.domainStatus({status:'PENDING'}),'正在申请证书…');p
 assert.equal(context.domainStatus({status:'ACTIVE'}),'正常');passed++;
 assert.equal(context.domainStatus({status:'ERROR'}),'证书申请失败');passed++;
 assert.equal(context.domainStatus({status:'REMOVING'}),'正在删除…');passed++;
+
+// Execute the real page/poll functions with a small DOM and cancellable fake clock.
+// No browser dependency or real three-second waits are required for async race coverage.
+const domainCode = script.slice(script.indexOf('let domainPoll'), script.indexOf('async function settings('));
+const pollCode = domainCode.slice(0, domainCode.indexOf('function domainStatus('));
+const showCode = script.slice(script.indexOf('async function show(page)'), script.indexOf('function fmtTime('));
+const domHelpers = script.slice(script.indexOf('function node('), script.indexOf('async function api('));
+const domainData = (...states) => ({
+    domains: [{id:1,fqdn:'gateway.test',role:'PRIMARY',status:'ACTIVE'}, ...states.map((status,i)=>({id:i+2,fqdn:`alias${i}.example.net`,role:'ALIAS',status,credential_name:'CF profile',expires_at:12345,last_error:status==='ERROR'?'safe failure':null}))],
+    credentials: [{id:7,name:'CF profile',zone_name:'example.net',zone_id:'a'.repeat(32),token_last4:'9876',last_test_ok:1}]
+});
+function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject}}
+function domainHarness(){
+    const timers=new Map(),responses=[],calls=[],elements=new Map();let timerId=0,peakTimers=0,cleared=0;
+    const viewport={scrollX:11,scrollY:270,restores:0,scrollTo(x,y){this.scrollX=x;this.scrollY=y;this.restores++}};
+    class Element {
+        constructor(tag){this.tagName=tag;this.children=[];this.parent=null;this.text='';this.style={};this.scrollTop=0;this.scrollLeft=0;this.replaceCalls=0;this.classList={toggle(){}}}
+        set textContent(value){this.text=String(value);this.children.forEach(c=>c.parent=null);this.children=[]}
+        get textContent(){return this.text+this.children.map(c=>c.textContent).join('')}
+        append(...children){for(const child of children){child.parent=this;this.children.push(child)}}
+        replaceChildren(...children){this.replaceCalls++;this.children.forEach(c=>c.parent=null);this.children=[];this.text='';this.append(...children);this.onReplace?.()}
+        get firstElementChild(){return this.children[0]||null}
+        get isConnected(){return Boolean(this.root||this.parent?.isConnected)}
+        get offsetHeight(){return Math.max(this.height??this.children.length*40,parseInt(this.style.minHeight)||0)}
+    }
+    for(const id of ['content','message','title','modal']){const element=new Element('div');element.id=id;element.root=true;elements.set(id,element)}
+    elements.get('modal').open=false;
+    const find=(element,id)=>element.id===id?element:element.children.map(child=>find(child,id)).find(Boolean);
+    const document={createElement:tag=>new Element(tag),getElementById:id=>elements.get(id)||find(elements.get('content'),id),querySelectorAll:()=>[]};
+    const sandbox=vm.createContext({document,window:viewport,Node:Element,fmtTime:v=>v?'time:'+v:'—',
+        setTimeout(fn,delay){assert.equal(delay,3000);timers.set(++timerId,fn);peakTimers=Math.max(peakTimers,timers.size);return timerId},
+        clearTimeout(id){if(timers.delete(id))cleared++},
+        async api(path,method='GET'){calls.push({path,method});assert.ok(responses.length,'unexpected API request');const response=responses.shift();return typeof response==='function'?await response():await response}
+    });
+    vm.runInContext("let currentPage='概览';const content=document.getElementById('content'),msg=document.getElementById('message');\n"+domHelpers+domainCode+showCode+"\nconst render={'入口域名':domainPage,'概览':async()=>content.append(node('p','overview'))};",sandbox);
+    return {timers,responses,calls,viewport,elements,sandbox,get peakTimers(){return peakTimers},get cleared(){return cleared},
+        evaluate:code=>vm.runInContext(code,sandbox),show:page=>vm.runInContext(`show(${JSON.stringify(page)})`,sandbox),
+        async mount(data){responses.push(data);await this.show('入口域名');return document.getElementById('domain-table')},
+        async tick(){const timer=timers.entries().next().value;if(!timer)return;timers.delete(timer[0]);await timer[1]()},
+        get container(){return document.getElementById('domain-table')},get content(){return elements.get('content')},get modal(){return elements.get('modal')}
+    };
+}
+async function domainCheck(name,run){try{await run();passed++}catch(error){error.message=name+': '+error.message;throw error}}
+for(const state of ['ACTIVE','ERROR'])await domainCheck(state+'-only is completely idle',async()=>{
+    const h=domainHarness();await h.mount(domainData(state));assert.equal(h.timers.size,0);assert.equal(h.evaluate('domainPoll'),undefined);await h.tick();assert.equal(h.calls.length,1);
+});
+for(const state of ['PENDING','REMOVING'])await domainCheck(state+' starts one timer',async()=>{
+    const h=domainHarness();await h.mount(domainData(state));assert.equal(h.timers.size,1);assert.equal(h.peakTimers,1);
+});
+for(const state of ['ACTIVE','ERROR'])await domainCheck('PENDING to '+state+' updates and stops',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING'));h.responses.push(domainData(state));await h.tick();assert.equal(h.timers.size,0);
+    assert.ok(h.container.textContent.includes(state==='ACTIVE'?'正常':'证书申请失败'));assert.ok(h.container.textContent.includes('time:12345'));
+    if(state==='ERROR'){assert.ok(h.container.textContent.includes('重试'));assert.ok(h.container.textContent.includes('删除'))}
+});
+await domainCheck('REMOVING completes and removes its row',async()=>{
+    const h=domainHarness();await h.mount(domainData('REMOVING'));h.responses.push(domainData());await h.tick();assert.equal(h.timers.size,0);assert.ok(!h.container.textContent.includes('alias0.example.net'));
+});
+await domainCheck('one remaining task keeps polling',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING','REMOVING'));h.responses.push(domainData('ACTIVE','REMOVING'));await h.tick();assert.equal(h.timers.size,1);h.responses.push(domainData('ACTIVE'));await h.tick();assert.equal(h.timers.size,0);
+});
+for(const [name,pattern] of [['no automatic show',/\bshow\s*\(/],['no whole content replacement',/content\.replaceChildren/],['no whole page render',/\bdomainPage\s*\(/],['no permanent interval',/\bsetInterval\s*\(/]])await domainCheck(name,()=>{
+    assert.ok(!pattern.test(pollCode));
+    if(name==='no permanent interval')assert.ok(!pattern.test(domainCode));
+});
+await domainCheck('poll replaces only the domain table and preserves positions',async()=>{
+    const h=domainHarness(),container=await h.mount(domainData('PENDING')),pageChildren=[...h.content.children],message=h.elements.get('message');
+    message.textContent='keep this notice';container.height=400;container.firstElementChild.scrollTop=37;container.firstElementChild.scrollLeft=21;
+    h.responses.push(domainData('PENDING'));await h.tick();assert.deepEqual(h.content.children,pageChildren);assert.equal(h.content.replaceCalls,1);assert.equal(container.replaceCalls,2);
+    assert.equal(message.textContent,'keep this notice');assert.equal(h.viewport.scrollY,270);assert.equal(h.viewport.scrollX,11);assert.equal(container.style.minHeight,'400px');assert.equal(container.firstElementChild.scrollTop,37);assert.equal(container.firstElementChild.scrollLeft,21);
+});
+await domainCheck('credential region is not redrawn by repeated polls',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING'));const credentials=h.content.children.at(-1),heading=h.content.children[4];
+    for(let i=0;i<3;i++){h.responses.push(domainData('PENDING'));await h.tick();assert.equal(h.content.children.at(-1),credentials);assert.equal(h.content.children[4],heading)}
+    assert.equal(h.peakTimers,1);assert.equal(h.content.replaceCalls,1);
+});
+await domainCheck('table layout scroll displacement is restored',async()=>{
+    const h=domainHarness(),container=await h.mount(domainData('REMOVING'));container.onReplace=()=>{h.viewport.scrollY=0;h.viewport.scrollX=0};h.responses.push(domainData());await h.tick();assert.equal(h.viewport.scrollY,270);assert.equal(h.viewport.scrollX,11);assert.equal(h.viewport.restores,1);
+});
+await domainCheck('open modal skips GET and DOM on every tick',async()=>{
+    const h=domainHarness(),container=await h.mount(domainData('PENDING'));h.modal.open=true;
+    for(let i=0;i<3;i++){await h.tick();assert.equal(h.calls.length,1);assert.equal(container.replaceCalls,1);assert.equal(h.content.replaceCalls,1);assert.equal(h.modal.open,true);assert.equal(h.timers.size,1)}
+    h.modal.open=false;h.responses.push(domainData('ACTIVE'));await h.tick();assert.equal(h.timers.size,0);assert.equal(container.replaceCalls,2);
+});
+await domainCheck('modal opened during GET defers completion DOM until closed',async()=>{
+    const h=domainHarness(),container=await h.mount(domainData('PENDING')),request=deferred();h.responses.push(request.promise);const polling=h.tick();h.modal.open=true;request.resolve(domainData('ACTIVE'));await polling;
+    assert.equal(container.replaceCalls,1);assert.equal(h.timers.size,1);assert.equal(h.modal.open,true);assert.equal(h.content.replaceCalls,1);
+    h.modal.open=false;h.responses.push(domainData('ACTIVE'));await h.tick();assert.equal(container.replaceCalls,2);assert.equal(h.timers.size,0);
+});
+await domainCheck('navigation cancels scheduled polling',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING'));await h.show('概览');assert.equal(h.timers.size,0);assert.equal(h.evaluate('domainPoll'),undefined);assert.equal(h.cleared,1);await h.tick();assert.equal(h.calls.length,1);
+});
+await domainCheck('late poll response does not touch another page',async()=>{
+    const h=domainHarness(),container=await h.mount(domainData('PENDING')),request=deferred();h.responses.push(request.promise);const polling=h.tick();await h.show('概览');request.resolve(domainData('ACTIVE'));await polling;
+    assert.equal(container.replaceCalls,1);assert.equal(h.content.textContent,'overview');assert.equal(h.timers.size,0);
+});
+for(const fail of [false,true])await domainCheck('stale '+(fail?'failed':'successful')+' poll cannot overwrite reentered page or timer',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING'));const request=deferred();h.responses.push(request.promise);const polling=h.tick();await h.show('概览');const current=await h.mount(domainData('REMOVING')),timer=h.evaluate('domainPoll');
+    if(fail)request.reject(Error('old request failed'));else request.resolve(domainData('ACTIVE'));await polling;
+    assert.equal(current.replaceCalls,1);assert.equal(h.evaluate('domainPoll'),timer);assert.equal(h.timers.size,1);assert.ok(current.textContent.includes('正在删除…'));
+});
+await domainCheck('stale initial GET cannot append duplicate domain page',async()=>{
+    const h=domainHarness(),request=deferred();h.responses.push(request.promise);const old=h.show('入口域名');await h.show('概览');const current=await h.mount(domainData('PENDING'));request.resolve(domainData('ACTIVE'));await old;
+    assert.equal(h.container,current);assert.equal(h.content.children.length,7);assert.equal(h.timers.size,1);assert.equal(current.replaceCalls,1);
+});
+await domainCheck('stale initial GET error does not overwrite another page message',async()=>{
+    const h=domainHarness(),request=deferred();h.responses.push(request.promise);const old=h.show('入口域名');await h.show('概览');h.elements.get('message').textContent='new page message';request.reject(Error('旧请求失败'));await old;assert.equal(h.elements.get('message').textContent,'new page message');
+});
+await domainCheck('repeated manual show never accumulates timers',async()=>{
+    const h=domainHarness();for(let i=0;i<4;i++){await h.mount(domainData('PENDING'));assert.equal(h.timers.size,1)}assert.equal(h.peakTimers,1);assert.equal(h.cleared,3);
+});
+await domainCheck('already queued stale callback cannot start another GET',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING'));const oldCallback=[...h.timers.values()][0];await h.mount(domainData('REMOVING'));const timer=h.evaluate('domainPoll');await oldCallback();assert.equal(h.calls.length,2);assert.equal(h.evaluate('domainPoll'),timer);assert.equal(h.timers.size,1);
+});
+await domainCheck('slow GET never overlaps the next poll',async()=>{
+    const h=domainHarness();await h.mount(domainData('PENDING'));const request=deferred();h.responses.push(request.promise);const polling=h.tick();assert.equal(h.timers.size,0);await h.tick();assert.equal(h.calls.length,2);request.resolve(domainData('PENDING'));await polling;assert.equal(h.timers.size,1);assert.equal(h.peakTimers,1);
+});
+await domainCheck('GET failure preserves the table/message and retries a known pending task',async()=>{
+    const h=domainHarness(),container=await h.mount(domainData('PENDING'));h.elements.get('message').textContent='keep notice';h.responses.push(()=>{throw Error('network failure')});await h.tick();assert.equal(container.replaceCalls,1);assert.equal(h.elements.get('message').textContent,'keep notice');assert.equal(h.timers.size,1);h.responses.push(domainData('ACTIVE'));await h.tick();assert.equal(h.timers.size,0);
+});
 console.log(`PASS: ${passed} tracking/domain UI JavaScript checks`);
