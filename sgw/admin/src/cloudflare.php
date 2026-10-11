@@ -100,6 +100,7 @@ function cloudflare_save_profile(PDO $pdo, array $body, ?int $id = null, ?callab
     $zone = cloudflare_zone($token, $zoneId, $client);
     $name = trim((string) ($body['name'] ?? $old['name'] ?? ''));
     if ($name === '') $name = 'Cloudflare ' . $zone;
+    if (str_contains($name,$token)) throw new InvalidArgumentException('凭据名称不可包含 API Token');
     if (strlen($name) > 160 || preg_match('/[\x00-\x1f\x7f]/', $name)) throw new InvalidArgumentException('凭据名称不正确');
     return write_transaction($pdo, static function () use ($pdo, $id, $token, $zoneId, $zone, $name): int {
         if ($id !== null) {

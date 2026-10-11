@@ -39,14 +39,20 @@ function domain_add(PDO $pdo, array $body, ?callable $client=null): int
     $profileId=(int)($body['credential_id']??0);
     if($profileId>0) {
         $profile=cloudflare_profile($pdo,$profileId);
-        $zone=cloudflare_zone(cloudflare_decrypt($profile['token_encrypted']),$profile['zone_id'],$client);
+        $token=cloudflare_decrypt($profile['token_encrypted']);
+        $zone=cloudflare_zone($token,$profile['zone_id'],$client);
     } else {
-        $zone=cloudflare_zone(trim((string)($body['token']??'')),(string)($body['zone_id']??''),$client);
+        $token=trim((string)($body['token']??''));
+        $zone=cloudflare_zone($token,(string)($body['zone_id']??''),$client);
     }
+    if(str_contains($fqdn,strtolower($token))) throw new InvalidArgumentException('入口域名不可包含 API Token');
     if(!domain_in_zone($fqdn,$zone)) throw new InvalidArgumentException('备用域名不属于该 Cloudflare Zone');
-    return write_transaction($pdo,static function()use($pdo,$body,$profileId,$fqdn,$client):int{
+    $validatedZoneId=$profileId>0?$profile['zone_id']:cloudflare_zone_id((string)$body['zone_id']);
+    // Do not hold SQLite's global writer lock during a second network validation.
+    $validatedClient=static fn()=>['success'=>true,'result'=>['id'=>$validatedZoneId,'name'=>$zone]];
+    return write_transaction($pdo,static function()use($pdo,$body,$profileId,$fqdn,$validatedClient):int{
         domain_add_guard($pdo,$fqdn);
-        $id=$profileId>0?$profileId:cloudflare_save_profile($pdo,$body,null,$client);
+        $id=$profileId>0?$profileId:cloudflare_save_profile($pdo,$body,null,$validatedClient);
         if(!domain_in_zone($fqdn,cloudflare_profile($pdo,$id)['zone_name'])) throw new InvalidArgumentException('备用域名不属于该 Cloudflare Zone');
         $q=$pdo->prepare("INSERT INTO gateway_domains(fqdn,role,status,credential_id,certificate_path,created_at,updated_at) VALUES (?,'ALIAS','PENDING',?,'',?,?)");
         $q->execute([$fqdn,$id,time(),time()]); $domainId=(int)$pdo->lastInsertId();

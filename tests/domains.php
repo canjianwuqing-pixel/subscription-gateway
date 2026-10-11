@@ -100,4 +100,17 @@ test_case('Post-ACK delete cleanup failure never resurrects an ACTIVE alias',fun
     chmod($locked,0700);$db->exec('UPDATE certificate_jobs SET next_retry_at=0');
     domain_process_one($db,null,'domain_test_publish');expect_exception(fn()=>domain_row($db,$id),InvalidArgumentException::class);
 });
+test_case('Inline CF validation never performs HTTP inside a SQLite writer transaction',function(){
+    $db=domain_fixture();$calls=0;
+    $client=function(...$args)use($db,&$calls){expect_same(false,$db->inTransaction());$calls++;return domain_test_client(...$args);};
+    domain_add($db,['fqdn'=>'a.example.net','token'=>DOMAIN_TEST_SECRET,'zone_id'=>str_repeat('a',32)],$client);
+    expect_same(1,$calls);
+});
+test_case('Credential name cannot accidentally expose the full API Token',function(){
+    $db=domain_fixture();expect_exception(fn()=>cloudflare_save_profile($db,['name'=>'profile '.DOMAIN_TEST_SECRET,'zone_id'=>str_repeat('a',32),'token'=>DOMAIN_TEST_SECRET],null,'domain_test_client'),InvalidArgumentException::class);expect_same([],cloudflare_profiles($db));
+});
+test_case('Alias FQDN cannot accidentally publish the API Token in Nginx',function(){
+    $db=domain_fixture();$token='sensitiveToken9876';$profile=domain_profile_fixture($db,'a',$token);
+    expect_exception(fn()=>domain_add($db,['fqdn'=>strtolower($token).'.example.net','credential_id'=>$profile],'domain_test_client'),InvalidArgumentException::class);
+});
 putenv('CONTROL_DIR');putenv('DOMAIN_CERT_DIR');
