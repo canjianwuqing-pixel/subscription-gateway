@@ -746,7 +746,8 @@ jq -e '.tracking.source_stats.current==6' "$temporary/admin-response" >/dev/null
 cp "$temporary/admin-response" "$temporary/source-tracking.json"
 leaf_ids=$(jq -r '.tracking.groups[] | select(.status=="ACTIVE" and .path!="root" and .has_active_children==0) | .id' "$temporary/source-tracking.json")
 for leaf_id in $leaf_ids; do
-    jq --argjson id "$leaf_id" '{mappings:[.tracking.groups[] | select(.id==$id) | .mappings[] |
+    jq --argjson id "$leaf_id" '[.tracking.sources[] | select(.state=="CURRENT" and .in_latest==1) | .source_host] as $current |
+        {mappings:[.tracking.groups[] | select(.id==$id) | .mappings[] | select(.source_host as $host | $current | index($host)) |
         {source_host,target_host:(if (.source_host|test("^na00[1-5]\\.example\\.com$")) then "partial.example.invalid"
             elif .source_host=="na006.example.com" then null else .target_host end)}]}' \
         "$temporary/source-tracking.json" > "$temporary/partial-mapping.json"
@@ -799,22 +800,41 @@ admin_request api/tracking/sources/na001.example.com --request PATCH --header 'C
 admin_request api/tracking/sources/na001.example.com --request PATCH --header 'Content-Type: application/json' \
     --header "X-CSRF-Token: $admin_csrf" --data '{"source_host":"renamed.example.com"}'
 [[ $admin_code == 200 ]] && jq -e '.source.state=="UNSEEN"' "$temporary/admin-response" >/dev/null || fail 'unseen source rename failed'
+admin_request api/tracking
+jq -e 'all(.tracking.sources[]; .source_host!="na001.example.com") and
+    all(.tracking.groups[].mappings[]; .source_host!="na001.example.com")' "$temporary/admin-response" >/dev/null \
+    || fail 'rename retained old source or mappings'
 request "$path?token=$token&format=sources6"
 [[ $request_exit == 0 && $request_code == 200 && $(grep -c '^trojan://' "$temporary/response") == 4 ]] \
     || fail 'renamed old source was not filtered'
 admin_request api/tracking
-jq -e '.tracking.source_stats.current==5 and .tracking.source_stats.manual_unseen==2 and
-    any(.tracking.sources[]; .source_host=="na001.example.com" and .state=="DELETED" and .in_latest==1) and
+jq -e '.tracking.source_stats.current==6 and .tracking.source_stats.manual_unseen==2 and
+    any(.tracking.sources[]; .source_host=="na001.example.com" and .state=="CURRENT" and .origin=="AUTO" and .in_latest==1) and
+    all(.tracking.groups[] | select(.status=="ACTIVE" and .path!="root") | .mappings[] | select(.source_host=="na001.example.com"); .target_host==null) and
     all(.tracking.groups[] | select(.status=="ACTIVE" and .path!="root") | .mappings[] | select(.source_host=="renamed.example.com"); .target_host=="partial.example.invalid")' \
-    "$temporary/admin-response" >/dev/null || fail 'rename failed to retain targets or tombstone'
+    "$temporary/admin-response" >/dev/null || fail 'rename failed to retain targets or relearn old host with NULL targets'
 admin_request api/tracking/sources/na002.example.com --request DELETE --header "X-CSRF-Token: $admin_csrf"
 [[ $admin_code == 200 ]] || fail 'deleting an in-use source was prohibited'
+admin_request api/tracking
+jq -e 'all(.tracking.sources[]; .source_host!="na002.example.com") and all(.tracking.groups[].mappings[]; .source_host!="na002.example.com")' \
+    "$temporary/admin-response" >/dev/null || fail 'physical delete retained source or target rows'
+admin_request api/tracking/sources/na002.example.com --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 404 ]] || fail 'missing source delete did not return 404'
+admin_request api/tracking/sources/na002.example.com/restore --request POST --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 404 ]] || fail 'removed restore endpoint remains operational'
 request "$path?token=$token&format=sources6"
 [[ $request_exit == 0 && $request_code == 200 && $(grep -c '^trojan://' "$temporary/response") == 3 ]] \
     || fail 'deleted source was not safely filtered'
-for source in na001.example.com na002.example.com; do
-    admin_request "api/tracking/sources/$source/restore" --request POST --header "X-CSRF-Token: $admin_csrf"
-    [[ $admin_code == 200 ]] && jq -e '.source.state=="CURRENT"' "$temporary/admin-response" >/dev/null || fail 'current source restore failed'
+admin_request api/tracking
+cp "$temporary/admin-response" "$temporary/relearned-tracking.json"
+for leaf_id in $leaf_ids; do
+    jq --argjson id "$leaf_id" '[.tracking.sources[] | select(.state=="CURRENT" and .in_latest==1) | .source_host] as $current |
+        {mappings:[.tracking.groups[] | select(.id==$id) | .mappings[] | select(.source_host as $host | $current | index($host)) |
+            {source_host,target_host:(if (.source_host|test("^na00[12]\\.example\\.com$")) then "partial.example.invalid" else .target_host end)}]}' \
+        "$temporary/relearned-tracking.json" > "$temporary/remap.json"
+    admin_request "api/tracking/groups/$leaf_id/mappings" --request PUT --header 'Content-Type: application/json' \
+        --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/remap.json"
+    [[ $admin_code == 200 ]] || fail 'explicit target reconfiguration after relearning failed'
 done
 
 request "$path?token=$token&format=sources-yaml"
@@ -854,10 +874,22 @@ for format in sources6 sources-base64 sources-yaml; do
     [[ $request_exit == 0 && $request_code == 503 ]] || fail 'all filtered did not return 503'
     [[ $(<"$temporary/response") == 'Subscription transformation unavailable.' ]] || fail 'all-filtered response leaked body or returned metadata-only success'
 done
-for source in na001.example.com na002.example.com na003.example.com na004.example.com na005.example.com; do
-    admin_request "api/tracking/sources/$source/restore" --request POST --header "X-CSRF-Token: $admin_csrf"
-    [[ $admin_code == 200 ]] || fail 'restoring usable sources failed'
+# Explicitly remap the newly learned hosts; never resurrect deleted targets.
+db tracking-mode preflight
+publish
+admin_request api/tracking
+cp "$temporary/admin-response" "$temporary/relearned-tracking.json"
+for leaf_id in $leaf_ids; do
+    jq --argjson id "$leaf_id" '{mappings:[.tracking.groups[] | select(.id==$id) | .mappings[] |
+        select(.source_host|test("^na00[1-6]\\.example\\.com$")) |
+        {source_host,target_host:(if .source_host=="na006.example.com" then null else "partial.example.invalid" end)}]}' \
+        "$temporary/relearned-tracking.json" > "$temporary/remap.json"
+    admin_request "api/tracking/groups/$leaf_id/mappings" --request PUT --header 'Content-Type: application/json' \
+        --header "X-CSRF-Token: $admin_csrf" --data-binary "@$temporary/remap.json"
+    [[ $admin_code == 200 ]] || fail 'remapping after all-filtered purge failed'
 done
+db tracking-mode enforced
+publish
 request "$path?token=$token&format=sources5"
 [[ $request_exit == 0 && $request_code == 200 ]] || fail 'five-source snapshot failed'
 admin_request api/tracking
@@ -869,5 +901,5 @@ jq -e '.tracking.source_stats.current==5 and any(.tracking.sources[]; .source_ho
 db tracking-mode off
 publish
 unset admin_csrf
-printf 'PASS: real HTTP source CRUD/auth/CSRF, 6-to-5 lifecycle, partial URI/Base64/YAML, safe references, all-filtered 503, failed/HEAD snapshots and unchanged assignments\n'
+printf 'PASS: real HTTP source add/rename/physical purge/auth/CSRF, relearn NULL targets, 6-to-5 lifecycle, partial URI/Base64/YAML, safe references, all-filtered 503, failed/HEAD snapshots and unchanged assignments\n'
 printf 'PASS: real Linux Docker, Nginx, mock upstream, rules, expiry, logs and permissions\n'

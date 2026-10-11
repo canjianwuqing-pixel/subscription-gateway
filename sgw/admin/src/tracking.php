@@ -220,19 +220,21 @@ function tracking_ensure_source_mappings(PDO $pdo, array $hosts): void
     }
 }
 
+final class TrackingSourceNotFound extends DomainException {}
+
 function tracking_source(PDO $pdo, string $host): array
 {
     $query = $pdo->prepare('SELECT * FROM tracking_sources WHERE source_host=:host');
     $query->execute([':host' => normalize_tracking_host($host)]);
     $row = $query->fetch();
-    if (!is_array($row)) throw new DomainException('原入口不存在');
+    if (!is_array($row)) throw new TrackingSourceNotFound('原入口不存在');
     return $row;
 }
 
 function tracking_assert_source_capacity(PDO $pdo): void
 {
     if ((int) $pdo->query('SELECT COUNT(*) FROM tracking_sources')->fetchColumn() >= 1000) {
-        throw new DomainException('原入口Catalog最多保留1000个入口（含历史及已删除入口）');
+        throw new DomainException('原入口Catalog最多保留1000个入口（含历史及备用入口）');
     }
 }
 
@@ -253,7 +255,7 @@ function tracking_sync_source_hosts(PDO $pdo, array $hosts, ?int $observedAt = n
         $snapshotId = (int) $pdo->lastInsertId();
         $insert = $pdo->prepare("INSERT INTO tracking_sources (source_host,origin,ever_seen,state,first_seen_at,last_seen_at,first_snapshot_id,last_snapshot_id,created_at,updated_at) "
             . "VALUES (:host,'AUTO',1,'CURRENT',:now,:now,:snapshot,:snapshot,:now,:now)");
-        $seen = $pdo->prepare("UPDATE tracking_sources SET ever_seen=1,state=CASE WHEN state='DELETED' THEN state ELSE 'CURRENT' END,"
+        $seen = $pdo->prepare("UPDATE tracking_sources SET ever_seen=1,state='CURRENT',"
             . 'first_seen_at=COALESCE(first_seen_at,:now),first_snapshot_id=COALESCE(first_snapshot_id,:snapshot),last_seen_at=:now,missing_count=0,last_snapshot_id=:snapshot,updated_at=:now WHERE source_host=:host');
         $query = $pdo->prepare('SELECT COUNT(*) FROM tracking_sources WHERE source_host=:host');
         foreach (array_keys($sources) as $source) {
@@ -265,7 +267,7 @@ function tracking_sync_source_hosts(PDO $pdo, array $hosts, ?int $observedAt = n
         }
         $missing = $pdo->prepare("UPDATE tracking_sources SET missing_count=missing_count+1,updated_at=:now,"
             . "state=CASE WHEN missing_count+1>=3 AND :now-last_seen_at>=600 THEN 'INACTIVE' ELSE 'SUSPECT' END "
-            . "WHERE ever_seen=1 AND state!='DELETED' AND (last_snapshot_id IS NULL OR last_snapshot_id!=:snapshot)");
+            . "WHERE ever_seen=1 AND (last_snapshot_id IS NULL OR last_snapshot_id!=:snapshot)");
         $missing->execute([':now' => $now, ':snapshot' => $snapshotId]);
         tracking_ensure_source_mappings($pdo, array_keys($sources));
     });
@@ -278,7 +280,6 @@ function tracking_add_source(PDO $pdo, string $host): array
         $query = $pdo->prepare('SELECT state FROM tracking_sources WHERE source_host=:host');
         $query->execute([':host' => $host]);
         $state = $query->fetchColumn();
-        if ($state === 'DELETED') return tracking_restore_source($pdo, $host);
         if ($state !== false) throw new DomainException('原入口已存在，请编辑现有入口');
         tracking_assert_source_capacity($pdo);
         $insert = $pdo->prepare("INSERT INTO tracking_sources (source_host,origin,state,created_at,updated_at) VALUES (:host,'MANUAL','UNSEEN',:now,:now)");
@@ -292,23 +293,12 @@ function tracking_delete_source(PDO $pdo, string $host): void
 {
     write_transaction($pdo, static function () use ($pdo, $host): void {
         $source = tracking_source($pdo, $host);
-        $update = $pdo->prepare("UPDATE tracking_sources SET state='DELETED',deleted_at=:now,updated_at=:now WHERE source_host=:host");
-        $update->execute([':host' => $source['source_host'], ':now' => time()]);
-        // Keep targets for an explicit restore; no enforced readiness veto on
-        // deleting an in-use host. Runtime will filter it, even if it was last.
-    });
-}
-
-function tracking_restore_source(PDO $pdo, string $host): array
-{
-    return write_transaction($pdo, static function () use ($pdo, $host): array {
-        $source = tracking_source($pdo, $host);
-        $latest = (int) $pdo->query('SELECT COALESCE(MAX(id),0) FROM tracking_source_snapshots')->fetchColumn();
-        $state = (int) $source['last_snapshot_id'] === $latest && $latest > 0 ? 'CURRENT' : ((int) $source['ever_seen'] ? 'SUSPECT' : 'UNSEEN');
-        $update = $pdo->prepare('UPDATE tracking_sources SET state=:state,deleted_at=NULL,missing_count=0,updated_at=:now WHERE source_host=:host');
-        $update->execute([':state' => $state, ':host' => $source['source_host'], ':now' => time()]);
-        tracking_ensure_source_mappings($pdo, [$source['source_host']]);
-        return tracking_source($pdo, $host);
+        $deleteMappings = $pdo->prepare('DELETE FROM tracking_entry_mappings WHERE source_host COLLATE NOCASE=:host');
+        $deleteMappings->execute([':host' => $source['source_host']]);
+        $deleteSource = $pdo->prepare('DELETE FROM tracking_sources WHERE source_host=:host');
+        $deleteSource->execute([':host' => $source['source_host']]);
+        // Do not veto deletion of the last usable source. A later complete
+        // snapshot learns it afresh with NULL targets, never the old targets.
     });
 }
 
@@ -319,21 +309,18 @@ function tracking_rename_source(PDO $pdo, string $old, string $new): array
         $source = tracking_source($pdo, $old);
         $old = $source['source_host'];
         if ($old === $new) return $source;
-        if ($source['state'] === 'DELETED') throw new DomainException('请先恢复已删除入口再修改');
         $query = $pdo->prepare('SELECT (SELECT COUNT(*) FROM tracking_sources WHERE source_host=:host) '
             . '+ (SELECT COUNT(*) FROM tracking_entry_mappings WHERE source_host=:host)');
         $query->execute([':host' => $new]);
         if ((int) $query->fetchColumn() !== 0) throw new DomainException('请先处理重复入口映射，不能覆盖已有target');
-        tracking_add_source($pdo, $new);
-        // Copy targets, retaining old rows behind the tombstone for audit and
-        // explicit restoration. Archived groups are never rewritten.
-        $update = $pdo->prepare('INSERT INTO tracking_entry_mappings (group_id,source_host,target_host,created_at,updated_at) '
-            . 'SELECT m.group_id,:new,m.target_host,:now,:now FROM tracking_entry_mappings m JOIN tracking_groups g ON g.id=m.group_id '
-            . "WHERE m.source_host=:old AND g.status!='ARCHIVED' "
-            . 'ON CONFLICT(group_id,source_host) DO UPDATE SET target_host=excluded.target_host,updated_at=excluded.updated_at');
+        // Rename every existing mapping in place, retaining IDs and targets.
+        // The new host has not been observed; the old host no longer exists.
+        $catalog = $pdo->prepare("UPDATE tracking_sources SET source_host=:new,origin='MANUAL',ever_seen=0,state='UNSEEN',"
+            . 'first_seen_at=NULL,last_seen_at=NULL,missing_count=0,first_snapshot_id=NULL,last_snapshot_id=NULL,deleted_at=NULL,updated_at=:now WHERE source_host=:old');
+        $catalog->execute([':new' => $new, ':old' => $old, ':now' => time()]);
+        $update = $pdo->prepare('UPDATE tracking_entry_mappings SET source_host=:new,updated_at=:now WHERE source_host COLLATE NOCASE=:old');
         $update->execute([':new' => $new, ':old' => $old, ':now' => time()]);
         tracking_ensure_source_mappings($pdo, [$new]);
-        tracking_delete_source($pdo, $old);
         return tracking_source($pdo, $new);
     });
 }
@@ -346,7 +333,7 @@ function tracking_list_sources(PDO $pdo): array
 
 function tracking_source_stats(PDO $pdo): array
 {
-    $counts = ['current' => 0, 'new' => 0, 'unmapped' => 0, 'suspect' => 0, 'inactive' => 0, 'manual_unseen' => 0, 'deleted' => 0];
+    $counts = ['current' => 0, 'new' => 0, 'unmapped' => 0, 'suspect' => 0, 'inactive' => 0, 'manual_unseen' => 0];
     $leaves = tracking_active_leaves($pdo);
     $latest = (int) $pdo->query('SELECT COALESCE(MAX(id),0) FROM tracking_source_snapshots')->fetchColumn();
     $available = array_map(static fn ($leaf) => tracking_available_mapping($pdo, (int) $leaf['id'], true), $leaves);
@@ -361,19 +348,25 @@ function tracking_source_stats(PDO $pdo): array
             }
         } elseif ($source['state'] === 'SUSPECT') $counts['suspect']++;
         elseif ($source['state'] === 'INACTIVE') $counts['inactive']++;
-        elseif ($source['state'] === 'DELETED') $counts['deleted']++;
         elseif ($source['origin'] === 'MANUAL') $counts['manual_unseen']++;
     }
     return $counts;
 }
 
-/** Admin form edits targets only; discovered sources cannot be removed or added.
+/** Admin form updates only the server's CURRENT/latest sources. Hidden backup
+ * and historical mappings are never removed or rewritten by this endpoint.
  * @param list<array{source_host:mixed,target_host:mixed}> $rows
  */
 function tracking_save_group_targets(PDO $pdo, int $groupId, array $rows): void
 {
     write_transaction($pdo, static function () use ($pdo, $groupId, $rows): void {
-        $known = array_column(tracking_group_mappings($pdo, $groupId), 'source_host');
+        $group = tracking_group($pdo, $groupId);
+        if ($group['path'] === 'root' || $group['status'] === 'ARCHIVED') throw new DomainException('This tracking group cannot have mappings');
+        if (count($rows) > 1000) throw new InvalidArgumentException('Too many entry mappings');
+        $current = $pdo->prepare("SELECT m.source_host FROM tracking_entry_mappings m JOIN tracking_sources s ON s.source_host=m.source_host "
+            . "WHERE m.group_id=:id AND s.state='CURRENT' AND s.last_snapshot_id=(SELECT MAX(id) FROM tracking_source_snapshots)");
+        $current->execute([':id' => $groupId]);
+        $known = $current->fetchAll(PDO::FETCH_COLUMN);
         $provided = [];
         foreach ($rows as $row) {
             if (!is_array($row)) throw new InvalidArgumentException('入口映射格式不正确');
@@ -384,7 +377,16 @@ function tracking_save_group_targets(PDO $pdo, int $groupId, array $rows): void
         if ($known === [] || $known !== $provided) {
             throw new DomainException('原入口列表已变化，请刷新后重新填写目标入口');
         }
-        tracking_save_group_mappings($pdo, $groupId, $rows);
+        $update = $pdo->prepare('UPDATE tracking_entry_mappings SET target_host=:target,updated_at=:now WHERE group_id=:group AND source_host=:source');
+        foreach ($rows as $row) {
+            $source = normalize_tracking_host((string) $row['source_host']);
+            $targetInput = trim((string) ($row['target_host'] ?? ''));
+            $target = $targetInput === '' ? null : normalize_tracking_host($targetInput);
+            $update->execute([':target' => $target, ':now' => time(), ':group' => $groupId, ':source' => $source]);
+        }
+        $updated = $pdo->prepare('UPDATE tracking_groups SET updated_at=:now WHERE id=:id');
+        $updated->execute([':now' => time(), ':id' => $groupId]);
+        if (tracking_mode($pdo) === 'enforced') tracking_validate_enforced_ready($pdo);
     });
 }
 
@@ -398,11 +400,11 @@ function tracking_effective_mapping(PDO $pdo, int $groupId): array
 }
 
 /** Current-only for readiness; runtime also accepts valid historical/manual
- * hosts actually present in this request, but NEVER a tombstoned source. */
+ * hosts actually present in this request. Physically deleted hosts cannot join. */
 function tracking_available_mapping(PDO $pdo, int $groupId, bool $currentOnly = false): array
 {
     $query = $pdo->prepare('SELECT m.source_host,m.target_host FROM tracking_entry_mappings m JOIN tracking_sources s ON s.source_host=m.source_host '
-        . "WHERE m.group_id=:id AND s.state!='DELETED' AND m.target_host IS NOT NULL AND TRIM(m.target_host)!=''"
+        . "WHERE m.group_id=:id AND m.target_host IS NOT NULL AND TRIM(m.target_host)!=''"
         . ($currentOnly ? " AND s.state='CURRENT' AND s.last_snapshot_id=(SELECT MAX(id) FROM tracking_source_snapshots)" : ''));
     $query->execute([':id' => $groupId]);
     $mapping = [];

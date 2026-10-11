@@ -37,7 +37,7 @@ $sourceSnapshotChecks = [
     'inactive automatic source recovers and clears its missing count' => function ($db): void { for ($i=0;$i<3;$i++) tracking_sync_source_hosts($db, source_hosts(5), time()+601); tracking_sync_source_hosts($db, source_hosts(), time()+602); $s=tracking_source($db, source_hosts()[5]); expect_same('CURRENT',$s['state']); expect_same(0,(int)$s['missing_count']); expect_same(6,tracking_source_stats($db)['current']); },
     'first seen is retained when a source recovers' => function ($db): void { $first=tracking_source($db,source_hosts()[5])['first_seen_at']; tracking_sync_source_hosts($db,source_hosts(5)); tracking_sync_source_hosts($db,source_hosts(),time()+602); expect_same($first,tracking_source($db,source_hosts()[5])['first_seen_at']); },
     'manual unseen backups do not inflate current counts' => function ($db): void { tracking_add_source($db,'backup.example.com'); expect_same(6,tracking_source_stats($db)['current']); expect_same(1,tracking_source_stats($db)['manual_unseen']); },
-    'deleted source is excluded even when present in latest snapshot' => function ($db): void { tracking_delete_source($db,source_hosts()[0]); tracking_sync_source_hosts($db,source_hosts()); expect_same(5,tracking_source_stats($db)['current']); expect_same('DELETED',tracking_source($db,source_hosts()[0])['state']); expect_same(1,(int)array_column(tracking_list_sources($db),null,'source_host')[source_hosts()[0]]['in_latest']); },
+    'deleted source disappears and is relearned with empty targets' => function ($db): void { tracking_delete_source($db,source_hosts()[0]); expect_same(5,tracking_source_stats($db)['current']); expect_exception(fn()=>tracking_source($db,source_hosts()[0]),TrackingSourceNotFound::class); tracking_sync_source_hosts($db,source_hosts()); expect_same(6,tracking_source_stats($db)['current']); expect_same('CURRENT',tracking_source($db,source_hosts()[0])['state']); foreach(tracking_active_leaves($db)as$leaf)expect_same(null,array_column(tracking_group_mappings($db,(int)$leaf['id']),null,'source_host')[source_hosts()[0]]['target_host']); },
     'current completion uses five of six not all catalog entries' => function ($db,$parent): void { for($i=0;$i<20;$i++)tracking_add_source($db,'backup'.$i.'.example.com'); $g=array_column(tracking_list_groups($db),null,'id')[$parent]; expect_same(6,$g['mapping_count']);expect_same(5,$g['mapping_filled_count']);expect_same(26,count(tracking_list_sources($db))); },
     'source snapshot does not reassign Tokens or change group IDs' => function ($db): void { $groups=$db->query('SELECT * FROM tracking_groups ORDER BY id')->fetchAll(); $assign=flexible_assignments($db);tracking_sync_source_hosts($db,source_hosts(5));expect_same($groups,$db->query('SELECT * FROM tracking_groups ORDER BY id')->fetchAll());expect_same($assign,flexible_assignments($db)); },
 ];
@@ -73,12 +73,12 @@ foreach (['https://example.com','example.com:443','/path','bad host','example.co
         expect_same($before,source_state_snapshot($db));
     });
 }
-test_case('Rename unseen destination preserves every current group target and tombstones old host',function():void{
+test_case('Rename unseen destination preserves every current group target and removes old host',function():void{
     [$db,$parent]=source_fixture();$before=[];foreach(tracking_active_leaves($db)as$leaf)$before[$leaf['id']]=tracking_available_mapping($db,(int)$leaf['id'])[source_hosts()[0]];
     $new=tracking_rename_source($db,source_hosts()[0],'new.example.com');expect_same('UNSEEN',$new['state']);
-    expect_same('DELETED',tracking_source($db,source_hosts()[0])['state']);
-    foreach($before as$id=>$target){$rows=array_column(tracking_group_mappings($db,(int)$id),null,'source_host');expect_same($target,$rows['new.example.com']['target_host']);expect_same($target,$rows[source_hosts()[0]]['target_host']);}
-    tracking_sync_source_hosts($db,source_hosts());expect_same('DELETED',tracking_source($db,source_hosts()[0])['state']);
+    expect_exception(fn()=>tracking_source($db,source_hosts()[0]),TrackingSourceNotFound::class);
+    foreach($before as$id=>$target){$rows=array_column(tracking_group_mappings($db,(int)$id),null,'source_host');expect_same($target,$rows['new.example.com']['target_host']);expect_true(!isset($rows[source_hosts()[0]]));}
+    tracking_sync_source_hosts($db,source_hosts());expect_same('AUTO',tracking_source($db,source_hosts()[0])['origin']);
     $result=tracking_process_subscription($db,$parent,source_body(source_hosts()));expect_same(4,$result['emitted_nodes']);
     expect_true(!str_contains($result['content'],'@'.source_hosts()[0].':'));
     tracking_sync_source_hosts($db,['new.example.com']);$result=tracking_process_subscription($db,$parent,source_body(['new.example.com']));expect_same(1,$result['emitted_nodes']);
@@ -111,24 +111,24 @@ test_case('Duplicate add is explicit and transactionally safe',function():void{
 });
 test_case('Deleting a current in-use source is allowed even in enforced mode',function():void{
     [$db,$parent]=source_fixture();tracking_set_mode($db,'enforced');$targets=tracking_group_mappings($db,$parent);
-    tracking_delete_source($db,source_hosts()[0]);expect_same($targets,tracking_group_mappings($db,$parent));
+    tracking_delete_source($db,source_hosts()[0]);expect_same(array_values(array_filter($targets,fn($row)=>$row['source_host']!==source_hosts()[0])),tracking_group_mappings($db,$parent));
     $result=tracking_process_subscription($db,$parent,source_body(source_hosts()));expect_same('PARTIAL_SUCCESS',$result['outcome']);expect_same(4,$result['emitted_nodes']);
-    tracking_restore_source($db,source_hosts()[0]);expect_same('CURRENT',tracking_source($db,source_hosts()[0])['state']);expect_same($targets,tracking_group_mappings($db,$parent));
+    expect_same('CURRENT',tracking_source($db,source_hosts()[0])['state']);expect_same(null,array_column(tracking_group_mappings($db,$parent),null,'source_host')[source_hosts()[0]]['target_host']);
 });
-test_case('Restoring absent historical source retains targets but is not counted current',function():void{
+test_case('Deleting an absent historical source removes it instead of retaining a restore record',function():void{
     [$db]=source_fixture();tracking_delete_source($db,source_hosts()[0]);tracking_sync_source_hosts($db,array_slice(source_hosts(),1));
-    tracking_restore_source($db,source_hosts()[0]);expect_same('SUSPECT',tracking_source($db,source_hosts()[0])['state']);expect_same(5,tracking_source_stats($db)['current']);
+    expect_exception(fn()=>tracking_source($db,source_hosts()[0]),TrackingSourceNotFound::class);expect_same(5,tracking_source_stats($db)['current']);
 });
-test_case('Explicit re-add of tombstone restores it without resetting existing targets',function():void{
+test_case('Explicit re-add after deletion is a new unseen record without old targets',function():void{
     [$db,$parent]=source_fixture();$before=tracking_group_mappings($db,$parent);tracking_delete_source($db,source_hosts()[0]);tracking_add_source($db,source_hosts()[0]);
-    expect_same('CURRENT',tracking_source($db,source_hosts()[0])['state']);expect_same($before,tracking_group_mappings($db,$parent));
+    expect_same('UNSEEN',tracking_source($db,source_hosts()[0])['state']);expect_same(null,array_column(tracking_group_mappings($db,$parent),null,'source_host')[source_hosts()[0]]['target_host']);
 });
 test_case('Snapshot mapping failure rolls back catalog snapshot and lifecycle together',function():void{
     [$db]=source_fixture();$db->exec("CREATE TRIGGER fail_source BEFORE INSERT ON tracking_entry_mappings WHEN NEW.source_host='new.example.com' BEGIN SELECT RAISE(ABORT,'test failure'); END");
     $before=source_state_snapshot($db);expect_exception(fn()=>tracking_sync_source_hosts($db,['new.example.com']),PDOException::class);expect_same($before,source_state_snapshot($db));
 });
-test_case('Manual rename failure rolls back tombstone and all target transfers',function():void{
-    [$db]=source_fixture();$db->exec("CREATE TRIGGER fail_rename BEFORE UPDATE OF target_host ON tracking_entry_mappings BEGIN SELECT RAISE(ABORT,'test failure'); END");
+test_case('Manual rename failure rolls back catalog rename and all target transfers',function():void{
+    [$db]=source_fixture();$db->exec("CREATE TRIGGER fail_rename BEFORE UPDATE OF source_host ON tracking_entry_mappings BEGIN SELECT RAISE(ABORT,'test failure'); END");
     $before=source_state_snapshot($db);expect_exception(fn()=>tracking_rename_source($db,source_hosts()[0],'new.example.com'),PDOException::class);expect_same($before,source_state_snapshot($db));
 });
 test_case('Catalog safety cap rejects new automatic and manual hosts without partial state',function():void{

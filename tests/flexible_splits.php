@@ -17,7 +17,7 @@ function flexible_fill_children(PDO $db, int $parent): array
     foreach ($children as $child) {
         $rows = array_map(static fn ($row) => ['source_host' => $row['source_host'],
             'target_host' => 'child-' . $child['id'] . '.example.com'], tracking_group_mappings($db, (int) $child['id']));
-        tracking_save_group_targets($db, (int) $child['id'], $rows);
+        tracking_save_group_mappings($db, (int) $child['id'], $rows);
     }
     return $children;
 }

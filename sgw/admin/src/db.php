@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-const DATABASE_SCHEMA_VERSION = 5;
+const DATABASE_SCHEMA_VERSION = 6;
 const TRACKING_ALGORITHM_VERSION = 1;
 
 function env_required(string $name): string
@@ -450,6 +450,40 @@ SQL);
                 throw new RuntimeException('Database migration integrity check failed');
             }
             $pdo->exec('PRAGMA user_version=5');
+            $version = 5;
+        }
+        if ($version === 5) {
+            // Explicit deletion now removes targets in every group, including
+            // archived history. Preserve snapshots and all unrelated records.
+            $pdo->exec(<<<'SQL'
+DELETE FROM tracking_entry_mappings
+WHERE source_host COLLATE NOCASE IN (SELECT source_host FROM tracking_sources WHERE state='DELETED');
+DELETE FROM tracking_sources WHERE state='DELETED';
+CREATE TABLE tracking_sources_v6 (
+    source_host TEXT PRIMARY KEY COLLATE NOCASE,
+    origin TEXT NOT NULL CHECK (origin IN ('AUTO','MANUAL')),
+    ever_seen INTEGER NOT NULL DEFAULT 0 CHECK (ever_seen IN (0,1)),
+    state TEXT NOT NULL CHECK (state IN ('CURRENT','SUSPECT','INACTIVE','UNSEEN')),
+    first_seen_at INTEGER,
+    last_seen_at INTEGER,
+    missing_count INTEGER NOT NULL DEFAULT 0 CHECK (missing_count >= 0),
+    first_snapshot_id INTEGER,
+    last_snapshot_id INTEGER,
+    deleted_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (first_snapshot_id) REFERENCES tracking_source_snapshots(id),
+    FOREIGN KEY (last_snapshot_id) REFERENCES tracking_source_snapshots(id)
+);
+INSERT INTO tracking_sources_v6 SELECT * FROM tracking_sources;
+DROP TABLE tracking_sources;
+ALTER TABLE tracking_sources_v6 RENAME TO tracking_sources;
+SQL);
+            if ($pdo->query('PRAGMA foreign_key_check')->fetchAll() !== []
+                || $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok']) {
+                throw new RuntimeException('Database migration integrity check failed');
+            }
+            $pdo->exec('PRAGMA user_version=6');
         }
         $pdo->commit();
     } catch (Throwable $error) {

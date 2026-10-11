@@ -39,10 +39,11 @@ assert.ok(!script.includes("field('子组数量'")); passed++;
 assert.ok(!script.includes('2-20')); passed++;
 for (const filled of [1, 4, 5]) { assert.equal(context.trackingMappingState({...group, mapping_filled_count: filled}).usable, true); passed++; }
 assert.equal(context.trackingMappingState({...group, mapping_filled_count: 0}).usable, false); passed++;
-for (const [state, text] of [['CURRENT','当前'],['SUSPECT','疑似失效'],['INACTIVE','已失效'],['UNSEEN','手动添加 · 当前未检测'],['DELETED','手动删除']]) {
+for (const [state, text] of [['CURRENT','当前'],['SUSPECT','疑似失效'],['INACTIVE','已失效'],['UNSEEN','手动添加 · 当前未检测']]) {
     assert.equal(context.trackingSourceState({state, in_latest: 0}), text); passed++;
 }
-assert.match(context.trackingSourceState({state: 'DELETED', in_latest: 1}), /上游仍出现.*已过滤/); passed++;
+assert.ok(!script.includes('DELETED')); passed++;
+assert.ok(!script.includes('恢复原入口') && !script.includes('/restore')); passed++;
 assert.equal(context.trackingSplitTime({...parent, split_at: 123}), 123); passed++;
 assert.equal(context.trackingSplitTime({...parent, has_active_children: 0, split_at: 123}), null); passed++;
 assert.ok(script.includes('fmtTime(trackingSplitTime(g))')); passed++;
@@ -50,4 +51,19 @@ assert.ok(script.includes('原入口管理') && script.includes('+ 添加原入�
 assert.ok(script.includes('当前最新订阅未检测到此入口，仍可保存')); passed++;
 assert.ok(script.includes('对应节点会过滤')); passed++;
 assert.ok(!/\b(?:prompt|confirm|alert)\s*\(/.test(script)); passed++;
+const catalog = ['CURRENT','SUSPECT','INACTIVE','UNSEEN'].map((state, i) => ({source_host: `source${i}`, state, in_latest: i === 0 ? 1 : 0}));
+catalog.push({source_host: 'stale-current', state: 'CURRENT', in_latest: 0});
+const sourceGroup = {mappings: [...catalog.map(s => ({source_host: s.source_host, target_host: 'target'})), {source_host: 'absent', target_host: 'target'}]};
+assert.deepEqual(Array.from(context.trackingCurrentMappings(sourceGroup, catalog), r => r.source_host), ['source0']); passed++;
+for (const host of ['source1','source2','source3','stale-current','absent']) {
+    assert.ok(!context.trackingCurrentMappings(sourceGroup, catalog).some(r => r.source_host === host)); passed++;
+}
+assert.equal(context.trackingCurrentMappings(sourceGroup, []).length, 0); passed++;
+assert.equal(context.trackingCurrentMappings({mappings: []}, catalog).length, 0); passed++;
+assert.equal(context.trackingCurrentMappings(sourceGroup, [{...catalog[0], in_latest: '1'}]).length, 1); passed++;
+assert.equal(context.trackingMappingState({...group, mapping_count: 1, mapping_filled_count: 1}).text, '1/1 已完成'); passed++;
+assert.ok(script.includes('mappings:inputs.map(')); passed++;
+assert.ok(script.includes('各组映射将被清理')); passed++;
+assert.ok(script.includes('作为新入口重新加入，target为空')); passed++;
+assert.ok(script.includes('历史及备用映射保持原样')); passed++;
 console.log(`PASS: ${passed} tracking UI JavaScript checks`);

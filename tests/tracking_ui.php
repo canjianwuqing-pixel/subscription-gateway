@@ -7,7 +7,7 @@ foreach (['映射状态', '已完成', '部分可用', '无可用映射', 'mappi
     '当前入口映射提示', '无法启用正式模式', '还有', '个入口未配置', '二分拆分必须完整保留2个子组',
     '删除待配置子组', '取消待配置拆分', 'trackingSplitPreview', 'trackingDraftWarning', 'trackingCanUndo', 'paddingLeft',
     '撤销拆分', 'undo-split', '旧待配置拆分', '父组当前没有可用映射', '请先撤销或处理下级拆分', '其它主组及兄弟分支不受影响',
-    '原入口管理', '+ 添加原入口', '修改原入口', '删除原入口', '恢复原入口', '疑似失效', '已失效', '手动删除',
+    '原入口管理', '+ 添加原入口', '修改原入口', '删除原入口', '编辑当前入口映射', '疑似失效', '已失效', '历史及备用映射保持原样',
     '当前最新订阅未检测到此入口，仍可保存', '节点会过滤', '至少需要1个当前可用目标入口', 'trackingSplitTime'] as $feature) {
     test_case('Tracking UI exposes ' . $feature, function () use ($trackingUiSource, $feature): void {
         expect_true(str_contains($trackingUiSource, $feature), $feature);

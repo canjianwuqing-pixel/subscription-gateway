@@ -17,7 +17,7 @@ test_case('v1 SQLite settings/admin schema migrates through tracking schema with
     $old->exec("INSERT INTO settings VALUES ('config_version', '7', 1)");
     $old->exec('PRAGMA user_version=1');
     initialize_database($old);
-    expect_same(5, (int) $old->query('PRAGMA user_version')->fetchColumn());
+    expect_same(6, (int) $old->query('PRAGMA user_version')->fetchColumn());
     expect_same('7', setting_get($old, 'config_version'));
     expect_same('30', setting_get($old, 'log_retention_days'));
     $columns = $old->query('PRAGMA table_info(admins)')->fetchAll();

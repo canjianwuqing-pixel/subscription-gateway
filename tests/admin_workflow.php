@@ -145,7 +145,7 @@ test_case('Legacy off Tokens backfill hashes without changing existing assignmen
     foreach ($rows as $row) expect_true($row['tracking_group_path'] !== null);
 });
 test_case('Schema v4 has no plaintext Token columns', function () use ($workflowPdo, $workflowToken): void {
-    expect_same(5, (int) $workflowPdo->query('PRAGMA user_version')->fetchColumn());
+    expect_same(6, (int) $workflowPdo->query('PRAGMA user_version')->fetchColumn());
     foreach (['tokens', 'access_logs', 'tracking_assignments'] as $table) {
         $columns = array_column($workflowPdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(), 'name');
         foreach (['token', 'plaintext', 'token_plaintext'] as $plaintext) expect_true(!in_array($plaintext, $columns, true));
@@ -269,7 +269,8 @@ test_case('Admin target-only save cannot add or remove a discovered source', fun
 test_case('Target host backend rejects URL and preserves transaction on failure', function () use ($sourcePdo): void {
     $id = (int) tracking_active_leaves($sourcePdo)[0]['id'];
     $rows = tracking_group_mappings($sourcePdo, $id);
-    $invalid = array_map(static fn ($row) => ['source_host' => $row['source_host'], 'target_host' => 'https://invalid.example.invalid'], $rows);
+    $current = array_column(array_filter(tracking_list_sources($sourcePdo), static fn ($source) => $source['state'] === 'CURRENT' && (int) $source['in_latest'] === 1), 'source_host');
+    $invalid = array_map(static fn ($host) => ['source_host' => $host, 'target_host' => 'https://invalid.example.invalid'], $current);
     expect_exception(static fn () => tracking_save_group_targets($sourcePdo, $id, $invalid), InvalidArgumentException::class);
     expect_same($rows, tracking_group_mappings($sourcePdo, $id));
 });
