@@ -59,6 +59,7 @@ write_test_config() {
 
 restore_previous_rules() {
     cp -- "$rules.bak" "$rules.restore" && chmod 0640 "$rules.restore" \
+        && chown --reference="$control" "$rules.restore" \
         && sync -f "$rules.restore" && mv -f -- "$rules.restore" "$rules" \
         && "$nginx_bin" -t >/dev/null 2>&1 \
         && "$nginx_bin" -s reload >/dev/null 2>&1

@@ -140,6 +140,9 @@ touch "$FAKE_NGINX_STATE/fail_reload_once"
 submit 77777777777777777777777777777777 2 '# candidate aliases'
 jq -e '.ok==false and .error_code=="RELOAD_FAILED"' "$CONTROL_DIR/domain-result.json" >/dev/null
 [[ $(cat "$CONTROL_DIR/domains.conf") == '# old aliases' ]]
+if [[ $(uname -s) != MINGW* ]]; then
+    [[ $(stat -c '%u:%g' "$CONTROL_DIR/domains.conf") == "$(stat -c '%u:%g' "$CONTROL_DIR")" ]]
+fi
 submit 88888888888888888888888888888888 2 '# good aliases'
 jq -e '.ok==true' "$CONTROL_DIR/domain-result.json" >/dev/null
 [[ $(cat "$CONTROL_DIR/domains.conf") == '# good aliases' ]]
@@ -148,4 +151,4 @@ submit 99999999999999999999999999999999 3 '# bad hash' yes
 jq -e '.ok==false and .error_code=="HASH_MISMATCH"' "$CONTROL_DIR/domain-result.json" >/dev/null
 [[ $(cat "$CONTROL_DIR/domains.conf") == '# good aliases' ]]
 [[ -f $CONTROL_DIR/result.json && -f $CONTROL_DIR/request.json && -f $CONTROL_DIR/candidate.conf ]]
-echo 'PASS: 11 fake watcher scenarios (not an Nginx integration test)'
+echo 'PASS: 12 fake watcher scenarios (not an Nginx integration test)'
