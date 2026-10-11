@@ -289,7 +289,14 @@ function domain_process_one(PDO $pdo,?callable $issuer=null,?callable $publisher
         if(!(($publisher??'domain_publish')($pdo,$job,$candidate))) throw new RuntimeException('Gateway reload failed');
         if($job['operation']==='REMOVE') {
             // Nginx has acknowledged removal. Cleanup first; crash retries are idempotent.
-            domain_remove_tree(domain_directory($id));
+            try { domain_remove_tree(domain_directory($id)); }
+            catch(Throwable) {
+                // Removal is already committed in Nginx. A filesystem cleanup failure must
+                // NOT resurrect ACTIVE in SQLite without restoring the removed server.
+                $pdo->prepare("UPDATE certificate_jobs SET next_retry_at=?,last_error='证书清理待重试',updated_at=? WHERE domain_id=?")->execute([$now+300,$now,$id]);
+                $pdo->prepare("UPDATE gateway_domains SET last_error='入口已移除，证书清理待重试' WHERE id=?")->execute([$id]);
+                return true;
+            }
             $pdo->prepare("DELETE FROM gateway_domains WHERE id=? AND role='ALIAS'")->execute([$id]);
         } else write_transaction($pdo,static function()use($pdo,$id,$expires,$now):void{
             $pdo->prepare("UPDATE gateway_domains SET status='ACTIVE',expires_at=?,last_error=NULL,next_check_at=?,updated_at=? WHERE id=?")->execute([$expires,$now+86400,$now,$id]);

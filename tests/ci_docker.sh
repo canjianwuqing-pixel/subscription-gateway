@@ -18,6 +18,7 @@ cleanup() {
     if (( status != 0 )) && [[ -f $env_file ]]; then
         printf 'CI failure; container status follows (no environment or request logs):\n' >&2
         compose ps >&2 || status=1
+        compose exec -T admin sh -c 'ls -l /run/certificate-worker.pid /control/certificate-worker.ready; ps -o pid,comm' >&2 || true
     fi
     if [[ -n $mock_id ]]; then
         docker rm -f "$mock_id" >/dev/null || status=1

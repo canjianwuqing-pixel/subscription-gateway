@@ -91,4 +91,13 @@ test_case('Restart RUNNING issue safely resumes without another issuance',functi
 test_case('Primary sync preserves aliases and refuses collision',function(){ $db=domain_fixture();$id=domain_ready_fixture($db);$old=domain_row($db,$id);domain_sync_primary($db,'new.gateway.test');expect_same($old,domain_row($db,$id));expect_same('new.gateway.test',domain_list($db)[0]['fqdn']);expect_exception(fn()=>domain_sync_primary($db,'a.example.net'),InvalidArgumentException::class); });
 test_case('Alias SNI candidate shares exact Gateway locations and no token or upstream data',function(){ $db=domain_fixture();$id=domain_ready_fixture($db);$text=domain_candidate($db,$id,'RENEW');expect_true(str_contains($text,'include /etc/nginx/gateway-locations.conf;'));expect_true(str_contains($text,'/domain-certs/'.$id.'/active/privkey.pem'));expect_true(!str_contains($text,DOMAIN_TEST_SECRET));expect_true(!str_contains($text,'proxy_pass')); });
 test_case('Adding alias never changes Token assignments or business settings',function(){ [$db]=source_fixture();$before=schema_v6_snapshot($db);domain_alias_fixture($db);expect_same($before,schema_v6_snapshot($db)); });
+test_case('Post-ACK delete cleanup failure never resurrects an ACTIVE alias',function(){
+    $db=domain_fixture();$id=domain_ready_fixture($db);domain_action($db,$id,'REMOVE');
+    $locked=domain_directory($id).'/locked';mkdir($locked,0700);file_put_contents($locked.'/file','fixture');chmod($locked,0000);
+    domain_process_one($db,null,'domain_test_publish');
+    expect_same('REMOVING',domain_row($db,$id)['status']);expect_same('RUNNING',domain_job($db,$id)['state']);
+    expect_true(!str_contains((string)file_get_contents(control_directory().'/domains.conf'),'a.example.net'));
+    chmod($locked,0700);$db->exec('UPDATE certificate_jobs SET next_retry_at=0');
+    domain_process_one($db,null,'domain_test_publish');expect_exception(fn()=>domain_row($db,$id),InvalidArgumentException::class);
+});
 putenv('CONTROL_DIR');putenv('DOMAIN_CERT_DIR');

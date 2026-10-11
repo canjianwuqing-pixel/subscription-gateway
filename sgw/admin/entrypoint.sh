@@ -35,6 +35,8 @@ worker_pid=$!
 su-exec www-data php /app/src/certificate_worker.php &
 cert_worker_pid=$!
 printf '%s\n' "$cert_worker_pid" > /run/certificate-worker.pid
+chown root:www-data /run/certificate-worker.pid
+chmod 0640 /run/certificate-worker.pid
 
 trap 'kill "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid" 2>/dev/null || true; wait "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid" 2>/dev/null || true; exit 0' TERM INT
 if wait -n "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid"; then
