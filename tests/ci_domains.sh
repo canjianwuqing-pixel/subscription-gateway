@@ -2,6 +2,7 @@
 # Sourced after existing CI subscription tests, using their real containers and authenticated Admin helper.
 set -euo pipefail
 secret=known_Cloudflare_secret_DO_NOT_PERSIST_9876
+admin_entry=${admin_url##*/}
 domain_passed=0
 domain_pass() { domain_passed=$((domain_passed+1)); printf 'PASS DOMAIN %02d: %s\n' "$domain_passed" "$1"; }
 alias_id=
@@ -53,7 +54,7 @@ for host in a.example.net node.other.org; do
     domain_pass 'alias subscription uses identical shared Gateway business chain'
     alias_request "$host" /unknown; [[ $alias_exit == 52 ]] || fail 'alias non-subscription path was not 444'
     domain_pass 'alias unknown path returns 444'
-    alias_request "$host" "/$admin_path/" 16444; [[ $alias_exit == 52 ]] || fail 'alias entered Admin port'
+    alias_request "$host" "/$admin_entry/" 16444; [[ $alias_exit == 52 ]] || fail 'alias entered Admin port'
     domain_pass 'Admin refuses alias Host even with ignored TLS mismatch'
 done
 db assert-assigned "$token"
@@ -66,7 +67,7 @@ admin_request api/domains
 ! grep -Fq token_encrypted "$temporary/admin-response" || fail 'GET API exposed ciphertext'
 domain_pass 'GET domains/profile returns only masked configured-token metadata'
 host_exit=0
-curl --silent --insecure --noproxy '*' --resolve gateway.test:16444:127.0.0.1 --header 'Host: gatewayXtest:16444' "https://gateway.test:16444/$admin_path/" >/dev/null 2>&1 || host_exit=$?
+curl --silent --insecure --noproxy '*' --resolve gateway.test:16444:127.0.0.1 --header 'Host: gatewayXtest:16444' "https://gateway.test:16444/$admin_entry/" >/dev/null 2>&1 || host_exit=$?
 [[ $host_exit == 52 ]] || fail 'Admin Host regex accepted a non-DNS-label match'
 domain_pass 'Admin Host matching treats DNS dots literally'
 admin_request '';! grep -Fq "$secret" "$temporary/admin-response" || fail 'HTML exposed CF secret'
