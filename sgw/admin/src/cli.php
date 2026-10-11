@@ -30,6 +30,7 @@ try {
         // Two newline-delimited fields via stdin only. Never echo credentials or upstream exceptions.
         try {
             $token=rtrim((string)fgets(STDIN,514),"\r\n"); $zone=rtrim((string)fgets(STDIN,64),"\r\n");
+            if($zone==='') $zone=cloudflare_discover_zone($token,env_required('GATEWAY_DOMAIN'));
             cloudflare_save_profile($pdo,['name'=>'默认 Cloudflare','token'=>$token,'zone_id'=>$zone]);
             sodium_memzero($token); echo 'CLOUDFLARE_PROFILE_READY',PHP_EOL;
         } catch(Throwable) { fwrite(STDERR,"Cloudflare profile initialization failed; add it in Admin later.\n"); exit(1); }

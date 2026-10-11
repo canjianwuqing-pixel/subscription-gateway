@@ -33,6 +33,8 @@ sni_fingerprint() {
 }
 printf '%s\n%s\n' "$secret" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | compose run --rm --no-deps -T --entrypoint su-exec admin www-data php /app/src/cli.php cloudflare-bootstrap >/dev/null
 domain_pass 'installer bootstrap encrypts CF profile using stdin'
+printf '%s\n\n' "$secret" | compose run --rm --no-deps -T --entrypoint su-exec admin www-data php /app/src/cli.php cloudflare-bootstrap >/dev/null
+domain_pass 'optional installer Zone ID safely discovers primary zone metadata'
 add_alias a.example.net aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 alias_a=$alias_id; domain_wait "$alias_a" ACTIVE
 domain_pass 'alias A certificate worker reaches ACTIVE after watcher ACK'

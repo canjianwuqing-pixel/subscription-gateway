@@ -113,4 +113,13 @@ test_case('Alias FQDN cannot accidentally publish the API Token in Nginx',functi
     $db=domain_fixture();$token='sensitiveToken9876';$profile=domain_profile_fixture($db,'a',$token);
     expect_exception(fn()=>domain_add($db,['fqdn'=>strtolower($token).'.example.net','credential_id'=>$profile],'domain_test_client'),InvalidArgumentException::class);
 });
+test_case('Optional installer Zone ID discovers the closest permitted DNS zone',function(){
+    $paths=[];$client=function($token,$method,$path)use(&$paths){$paths[]=$path;return ['success'=>true,'result'=>$path==='zones?name=example.net'?[['id'=>str_repeat('a',32),'name'=>'example.net']]:[]];};
+    expect_same(str_repeat('a',32),cloudflare_discover_zone(DOMAIN_TEST_SECRET,'sub.a.example.net',$client));
+    expect_same(['zones?name=sub.a.example.net','zones?name=a.example.net','zones?name=example.net'],$paths);
+});
+test_case('Zone discovery rejects false suffix metadata',function(){
+    $client=fn()=>['success'=>true,'result'=>[['id'=>str_repeat('a',32),'name'=>'notexample.net']]];
+    expect_exception(fn()=>cloudflare_discover_zone(DOMAIN_TEST_SECRET,'a.example.net',$client),RuntimeException::class);
+});
 putenv('CONTROL_DIR');putenv('DOMAIN_CERT_DIR');

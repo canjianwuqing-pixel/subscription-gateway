@@ -170,7 +170,7 @@ EOF
         admin_cli migrate >/dev/null || die 'SQLite initialization failed'
     fi
     if [[ $mode == dns-cf && $completed != yes ]]; then
-        if [[ -n ${INSTALL_CF_TOKEN:-} && ${INSTALL_CF_ZONE:-} =~ ^[A-Fa-f0-9]{32}$ ]]; then
+        if [[ -n ${INSTALL_CF_TOKEN:-} && ( -z ${INSTALL_CF_ZONE:-} || ${INSTALL_CF_ZONE:-} =~ ^[A-Fa-f0-9]{32}$ ) ]]; then
             if ! printf '%s\n%s\n' "$INSTALL_CF_TOKEN" "$INSTALL_CF_ZONE" | admin_cli cloudflare-bootstrap >/dev/null; then
                 warning 'Cloudflare凭据档案未初始化，可稍后在后台添加'
             fi

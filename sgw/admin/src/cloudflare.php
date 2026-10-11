@@ -77,6 +77,21 @@ function domain_in_zone(string $fqdn, string $zone): bool
     return $fqdn === $zone || str_ends_with($fqdn, '.' . $zone);
 }
 
+/** Preserve the host installer's optional Zone ID prompt: discover metadata only, never mutate DNS. */
+function cloudflare_discover_zone(string $token,string $fqdn,?callable $client=null):string
+{
+    $fqdn=domain_fqdn($fqdn);$labels=explode('.',$fqdn);
+    while(count($labels)>=2) {
+        $name=implode('.',$labels);
+        $data=($client??'cloudflare_request')($token,'GET','zones?name='.rawurlencode($name));
+        foreach($data['result']??[]as$row) {
+            if(($row['name']??'')===$name&&domain_in_zone($fqdn,$name)) return cloudflare_zone_id((string)($row['id']??''));
+        }
+        array_shift($labels);
+    }
+    throw new RuntimeException('Cloudflare Zone 查询失败，请稍后在后台添加凭据');
+}
+
 function cloudflare_profile(PDO $pdo, int $id): array
 {
     $q = $pdo->prepare('SELECT * FROM cloudflare_credentials WHERE id=?'); $q->execute([$id]);
