@@ -13,7 +13,18 @@ domain_wait() {
         if jq -e --argjson id "$id" --arg state "$expected" 'any(.domains[];.id==$id and .status==$state)' "$temporary/admin-response" >/dev/null; then return; fi
         sleep 1
     done
+    compose exec -T admin su-exec www-data php -r 'require "/app/src/domain_certificates.php"; $q=app_db()->prepare("SELECT d.id,d.status,d.last_error,j.operation,j.state,j.next_retry_at FROM gateway_domains d LEFT JOIN certificate_jobs j ON j.domain_id=d.id WHERE d.id=?");$q->execute([(int)$argv[1]]);echo json_encode($q->fetch()),PHP_EOL;' "$id" >&2
+    compose exec -T gateway cat /control/domain-result.json >&2
     fail "alias did not reach $expected"
+}
+domain_job_done() {
+    local id=$1 attempt state
+    for attempt in {1..30}; do
+        state=$(compose exec -T admin su-exec www-data php -r 'require "/app/src/domain_certificates.php"; $q=app_db()->prepare("SELECT state FROM certificate_jobs WHERE domain_id=?");$q->execute([(int)$argv[1]]);echo $q->fetchColumn();' "$id")
+        [[ $state == DONE ]] && return
+        sleep 1
+    done
+    fail 'certificate job did not commit DONE after TLS activation'
 }
 alias_request() {
     local host=$1 path=$2 port=${3:-18443}
@@ -118,10 +129,12 @@ account_sha=$(sudo sha256sum "$runtime/domain-certs/$alias_a/acme/ca/test-ca/acc
 admin_request "api/domains/$alias_a/retry" --request POST --header "X-CSRF-Token: $admin_csrf"
 for attempt in {1..40};do new_a_fp=$(sni_fingerprint a.example.net);[[ $new_a_fp != "$a_fp" ]] && break;sleep 1;done
 [[ $new_a_fp != "$a_fp" ]] || fail 'renew did not rotate cert';domain_wait "$alias_a" ACTIVE
+domain_job_done "$alias_a"
 [[ $(sudo sha256sum "$runtime/domain-certs/$alias_a/acme/ca/test-ca/account.key" | cut -d' ' -f1) == "$account_sha" ]] || fail 'ACME account regenerated'
 domain_pass 'renew atomically rotates only A and reuses persistent ACME account key'
 inject_gateway_failure reload
 admin_request "api/domains/$alias_b" --request DELETE --header "X-CSRF-Token: $admin_csrf"
+[[ $admin_code == 202 ]] || fail 'alias removal was not queued'
 domain_wait "$alias_b" ACTIVE
 [[ $(sni_fingerprint node.other.org) == "$b_fp" ]] || fail 'failed removal lost B'
 domain_pass 'failed deletion restores ACTIVE and old SNI certificate'
