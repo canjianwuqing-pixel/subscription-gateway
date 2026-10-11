@@ -168,7 +168,6 @@ test_case('user_version is seven and initialization is idempotent', function () 
     initialize_database($pdo);
     expect_same('preserved', setting_get($pdo, 'idempotence_probe'));
 });
-require __DIR__ . '/domains.php';
 
 test_case('SQLite runtime PRAGMAs are enabled', function () use ($pdo): void {
     expect_same('wal', strtolower((string) $pdo->query('PRAGMA journal_mode')->fetchColumn()));
@@ -533,6 +532,7 @@ require __DIR__ . '/schema_v5.php';
 require __DIR__ . '/source_purge.php';
 require __DIR__ . '/schema_v6.php';
 require __DIR__ . '/tracking_ui.php';
+require __DIR__ . '/domains.php';
 
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";
