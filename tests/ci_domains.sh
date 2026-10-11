@@ -63,6 +63,10 @@ admin_request api/domains
 ! grep -Fq "$secret" "$temporary/admin-response" || fail 'GET API exposed CF secret'
 ! grep -Fq token_encrypted "$temporary/admin-response" || fail 'GET API exposed ciphertext'
 domain_pass 'GET domains/profile returns only masked configured-token metadata'
+host_exit=0
+curl --silent --insecure --noproxy '*' --resolve gateway.test:16444:127.0.0.1 --header 'Host: gatewayXtest:16444' "https://gateway.test:16444/$admin_path/" >/dev/null 2>&1 || host_exit=$?
+[[ $host_exit == 52 ]] || fail 'Admin Host regex accepted a non-DNS-label match'
+domain_pass 'Admin Host matching treats DNS dots literally'
 admin_request '';! grep -Fq "$secret" "$temporary/admin-response" || fail 'HTML exposed CF secret'
 domain_pass 'Admin HTML contains no CF secret'
 profile_id=$(compose exec -T admin su-exec www-data php -r 'require "/app/src/domain_certificates.php"; echo domain_row(app_db(),(int)$argv[1])["credential_id"];' "$alias_a")

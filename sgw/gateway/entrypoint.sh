@@ -110,11 +110,20 @@ RULES
     echo 'No active rules; gateway started in fail-closed mode.' >&2
 fi
 domains=/control/domains.conf
-[[ ! -L $domains ]] || { echo 'Unsafe domains configuration' >&2; exit 1; }
+if [[ -L $domains ]]; then
+    # Move only the link itself; never read its target. Keep primary bootable.
+    mv -T -- "$domains" "/control/domains.unsafe.$(date +%s).$(od -An -N4 -tx1 /dev/urandom | tr -d ' ').link"
+    echo 'Unsafe alias configuration quarantined; recovering primary.' >&2
+fi
 if [[ ! -f $domains ]]; then
     printf '# No aliases configured.\n' > "$domains"
     chown --reference=/control "$domains"
     chmod 0640 "$domains"
+fi
+domain_mode=$(stat -c %a "$domains")
+if (( (8#$domain_mode & 0027) != 0 )); then
+    printf '# Unsafe alias permissions; primary-only recovery.\n' > "$domains"
+    chown --reference=/control "$domains"; chmod 0640 "$domains"
 fi
 if ! nginx -t >/dev/null 2>&1; then
     # Alias corruption must not take down the host-managed primary. Prefer last known good.

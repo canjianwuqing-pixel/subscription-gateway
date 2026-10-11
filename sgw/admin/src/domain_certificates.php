@@ -324,6 +324,10 @@ function domain_installation_check(PDO $pdo):array
     if(!$primary||$primary['fqdn']!==domain_fqdn(env_required('GATEWAY_DOMAIN'))||$primary['certificate_path']!=='/ssl/active') throw new RuntimeException('Primary domain mismatch');
     $rows=$pdo->query("SELECT * FROM gateway_domains WHERE role='ALIAS' AND status='ACTIVE'")->fetchAll();
     foreach($rows as$row) {
+        $base=domain_cert_root().'/'.(int)$row['id'];
+        foreach([domain_cert_root(),$base,$base.'/releases']as$path) {
+            if(!is_dir($path)||is_link($path)||(fileperms($path)&0027)!==0) throw new RuntimeException('Alias certificate permissions invalid');
+        }
         $release=domain_active((int)$row['id']); if($release===null) throw new RuntimeException('Alias certificate missing');
         $dir=domain_release_path((int)$row['id'],$release); domain_validate_certificate($dir,$row['fqdn']);
         foreach([$dir,$dir.'/privkey.pem',$dir.'/fullchain.pem']as$path) if((fileperms($path)&0027)!==0) throw new RuntimeException('Alias certificate permissions invalid');
