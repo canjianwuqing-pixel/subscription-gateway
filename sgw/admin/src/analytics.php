@@ -48,22 +48,37 @@ SQL);
 
 function token_analysis_rows(PDO $pdo, int $limit = 50, ?int $trackingGroupId = null): array
 {
-    tracking_backfill_token_assignments($pdo);
-    $limit = max(1, min(50, $limit));
-    if ($trackingGroupId !== null && $trackingGroupId < 1) {
-        throw new InvalidArgumentException('Invalid tracking group filter');
+    return token_analysis_page($pdo, ['limit' => max(1, min(50, $limit)), 'group_id' => $trackingGroupId])['rows'];
+}
+
+function analytics_positive_integer(mixed $value, int $maximum, string $error): int
+{
+    if ((!is_int($value) && !is_string($value)) || !preg_match('/^[1-9][0-9]*$/D', (string) $value)
+        || filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => $maximum]]) === false) {
+        throw new InvalidArgumentException($error);
     }
+    return (int) $value;
+}
+
+function token_analysis_page(PDO $pdo, array $filters = []): array
+{
+    $page = analytics_positive_integer($filters['page'] ?? 1, 10000, 'Invalid page filter');
+    $limit = min(50, analytics_positive_integer($filters['limit'] ?? 50, PHP_INT_MAX, 'Invalid limit filter'));
+    $trackingGroupId = isset($filters['group_id']) && $filters['group_id'] !== ''
+        ? analytics_positive_integer($filters['group_id'], PHP_INT_MAX, 'Invalid tracking group filter') : null;
+    tracking_backfill_token_assignments($pdo);
     $now = time();
     $groupFilter = $trackingGroupId === null ? '' : 'WHERE a.group_id = :tracking_group_id';
     $query = $pdo->prepare(<<<SQL
 WITH recent AS (
     SELECT t.id, t.token_encrypted, t.state, t.expires_at, t.first_seen, t.last_seen, t.request_count,
-           a.group_id AS tracking_group_id, g.path AS tracking_group_path
+           a.group_id AS tracking_group_id, g.path AS tracking_group_path,
+           COALESCE(t.last_seen, t.created_at) AS sort_seen
     FROM tokens t
     LEFT JOIN tracking_assignments a ON a.token_hash = t.token_hash
     LEFT JOIN tracking_groups g ON g.id = a.group_id
     {$groupFilter}
-    ORDER BY COALESCE(t.last_seen, t.created_at) DESC LIMIT :limit
+    ORDER BY COALESCE(t.last_seen, t.created_at) DESC, t.id DESC LIMIT :limit OFFSET :offset
 )
 SELECT t.*,
     COUNT(CASE WHEN l.created_at >= :m1 THEN 1 END) AS requests_1m,
@@ -76,9 +91,9 @@ SELECT t.*,
     (SELECT x.client_ip FROM access_logs x WHERE x.token_id = t.id ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS last_ip,
     (SELECT x.user_agent FROM access_logs x WHERE x.token_id = t.id ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS last_ua
 FROM recent t LEFT JOIN access_logs l ON l.token_id = t.id AND l.created_at >= :h24
-GROUP BY t.id ORDER BY t.last_seen DESC
+GROUP BY t.id ORDER BY t.sort_seen DESC, t.id DESC
 SQL);
-    foreach ([':limit' => $limit, ':m1' => $now - 60, ':m5' => $now - 300,
+    foreach ([':limit' => $limit + 1, ':offset' => ($page - 1) * $limit, ':m1' => $now - 60, ':m5' => $now - 300,
         ':h1' => $now - 3600, ':h24' => $now - 86400] as $key => $value) {
         $query->bindValue($key, $value, PDO::PARAM_INT);
     }
@@ -87,10 +102,12 @@ SQL);
     }
     $query->execute();
     $rows = $query->fetchAll();
+    $hasNext = $page < 10000 && count($rows) > $limit;
+    $rows = array_slice($rows, 0, $limit);
     foreach ($rows as &$row) {
         $plain = decrypt_token((string) $row['token_encrypted']);
         $row['token'] = $plain;
-        unset($row['token_encrypted']);
+        unset($row['token_encrypted'], $row['sort_seen']);
         $labels = [];
         if ((int) $row['ips_24h'] >= 5) $labels[] = '多IP';
         if ((int) $row['uas_24h'] >= 3) $labels[] = '多UA';
@@ -104,7 +121,7 @@ SQL);
         }
     }
     unset($row);
-    return $rows;
+    return ['rows' => $rows, 'page' => $page, 'has_next' => $hasNext];
 }
 
 function token_detail_data(PDO $pdo, int $id, string $window): ?array
@@ -140,6 +157,16 @@ function access_log_page(PDO $pdo, array $filters): array
     $page = min(10000, max(1, (int) ($filters['page'] ?? 1)));
     $where = ['l.created_at >= :since'];
     $params = [':since' => time() - $window];
+    if (isset($filters['group_id']) && $filters['group_id'] !== '') {
+        $groupId = analytics_positive_integer($filters['group_id'], PHP_INT_MAX, 'Invalid tracking group filter');
+        $group = $pdo->prepare('SELECT path FROM tracking_groups WHERE id = :id');
+        $group->execute([':id' => $groupId]);
+        $path = $group->fetchColumn();
+        if (!is_string($path)) throw new InvalidArgumentException('Invalid tracking group filter');
+        $where[] = '(g.path = :group_path OR g.path LIKE :group_descendants)';
+        $params[':group_path'] = $path;
+        $params[':group_descendants'] = $path . '.%';
+    }
     foreach (['ip' => 'l.client_ip', 'ua' => 'l.user_agent', 'decision' => 'l.decision'] as $input => $column) {
         if (isset($filters[$input]) && $filters[$input] !== '') {
             $value = (string) $filters[$input];

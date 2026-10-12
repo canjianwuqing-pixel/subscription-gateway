@@ -274,6 +274,26 @@ token_id=$(jq -er --arg token "$token" '.tokens[] | select(.token == $token) | .
 admin_request "api/tokens/$token_id/detail"
 jq -e --arg token "$token" '.detail.token.token == $token and .detail.token.tracking_group_path != null' \
     "$temporary/admin-response" >/dev/null || fail 'Token detail lacks full Token or group'
+pagination_group=$(jq -er '.detail.token.tracking_group_id' "$temporary/admin-response")
+pagination_path=$(jq -er '.detail.token.tracking_group_path' "$temporary/admin-response")
+admin_request "api/analysis/tokens?limit=50&page=1&group_id=$pagination_group"
+[[ $admin_code == 200 ]] && jq -e --arg token "$token" '.page==1 and .has_next==false and (.rows|any(.token==$token)) and (.rows|all(.token_encrypted==null and .sort_seen==null))' "$temporary/admin-response" >/dev/null \
+    || fail 'Token pagination API metadata or fields incorrect'
+admin_request "api/analysis/tokens?limit=50&page=2&group_id=$pagination_group"
+[[ $admin_code == 200 ]] && jq -e '.page==2 and .has_next==false and .rows==[]' "$temporary/admin-response" >/dev/null \
+    || fail 'Token pagination API did not accept page two'
+for query in 'page=0' 'page=10001' 'page=bad' 'page%5B%5D=1'; do
+    admin_request "api/analysis/tokens?$query"
+    [[ $admin_code == 422 ]] || fail 'Token API accepted invalid page'
+done
+admin_request "api/logs?group_id=$pagination_group&token=$token&window=24h"
+[[ $admin_code == 200 ]] && jq -e --arg path "$pagination_path" '.result.rows|length>0 and all(.tracking_group_path==$path)' "$temporary/admin-response" >/dev/null \
+    || fail 'Log API did not combine current group and Token filters'
+for group in 0 bad 999999999; do
+    admin_request "api/logs?group_id=$group"
+    [[ $admin_code == 422 ]] || fail 'Log API accepted invalid/nonexistent group'
+done
+printf 'PASS: real authenticated Token pagination and current-group log filter APIs\n'
 admin_request "api/logs?token=$token"
 jq -e --arg token "$token" '.result.rows | length > 0 and all(.token == $token and .tracking_group_path != null)' \
     "$temporary/admin-response" >/dev/null || fail 'full Token log search failed'

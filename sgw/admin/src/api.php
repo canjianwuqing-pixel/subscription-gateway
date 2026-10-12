@@ -421,6 +421,8 @@ function admin_error_message(string $message): string
         'Invalid time window' => '时间范围不正确',
         'Invalid status filter' => 'HTTP 状态筛选值不正确',
         'Invalid tracking group filter' => '入口组筛选值不正确',
+        'Invalid page filter' => '页码必须是 1 到 10000 的整数',
+        'Invalid limit filter' => '每页数量必须是正整数（最多 50 条）',
         'Filter is too long' => '筛选内容过长',
         'log_retention_days must be 1-3650' => '日志保留天数必须为1至3650',
         'Tracking group not found' => '未找到入口组',
@@ -526,12 +528,7 @@ function handle_api(string $route, string $method): never
             send_json(['ok' => true, 'overview' => overview_data($pdo)]);
         }
         if ($route === '/api/analysis/tokens' && $method === 'GET') {
-            $groupId = isset($_GET['group_id']) && $_GET['group_id'] !== '' ? (int) $_GET['group_id'] : null;
-            send_json(['ok' => true, 'rows' => token_analysis_rows(
-                $pdo,
-                (int) ($_GET['limit'] ?? 50),
-                $groupId
-            )]);
+            send_json(['ok' => true] + token_analysis_page($pdo, $_GET));
         }
         if ($route === '/api/logs' && $method === 'GET') {
             send_json(['ok' => true, 'result' => access_log_page($pdo, $_GET)]);

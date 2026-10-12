@@ -86,8 +86,8 @@ const domainData = (...states) => ({
     credentials: [{id:7,name:'CF profile',zone_name:'example.net',zone_id:'a'.repeat(32),token_last4:'9876',last_test_ok:1}]
 });
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject}}
-function domainHarness(){
-    const timers=new Map(),responses=[],calls=[],elements=new Map();let timerId=0,peakTimers=0,cleared=0;
+function domainHarness(management=false){
+    const timers=new Map(),responses=[],calls=[],elements=new Map(),copies=[];let timerId=0,peakTimers=0,cleared=0;
     const viewport={scrollX:11,scrollY:270,restores:0,scrollTo(x,y){this.scrollX=x;this.scrollY=y;this.restores++}};
     class Element {
         constructor(tag){this.tagName=tag;this.children=[];this.parent=null;this.text='';this.style={};this.scrollTop=0;this.scrollLeft=0;this.replaceCalls=0;this.classList={toggle(){}}}
@@ -95,6 +95,10 @@ function domainHarness(){
         get textContent(){return this.text+this.children.map(c=>c.textContent).join('')}
         append(...children){for(const child of children){child.parent=this;this.children.push(child)}}
         replaceChildren(...children){this.replaceCalls++;this.children.forEach(c=>c.parent=null);this.children=[];this.text='';this.append(...children);this.onReplace?.()}
+        get value(){return this._value??(this.tagName==='select'?this.children[0]?.value??'':'')}
+        set value(value){this._value=String(value)}
+        remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);this.parent=null}
+        querySelector(selector){const matches=element=>selector.startsWith('.')?(element.className||'').split(' ').includes(selector.slice(1)):element.tagName===selector;for(const child of this.children){if(matches(child))return child;const nested=child.querySelector(selector);if(nested)return nested}return null}
         get firstElementChild(){return this.children[0]||null}
         get isConnected(){return Boolean(this.root||this.parent?.isConnected)}
         get offsetHeight(){return Math.max(this.height??this.children.length*40,parseInt(this.style.minHeight)||0)}
@@ -103,13 +107,15 @@ function domainHarness(){
     elements.get('modal').open=false;
     const find=(element,id)=>element.id===id?element:element.children.map(child=>find(child,id)).find(Boolean);
     const document={createElement:tag=>new Element(tag),getElementById:id=>elements.get(id)||find(elements.get('content'),id),querySelectorAll:()=>[]};
-    const sandbox=vm.createContext({document,window:viewport,Node:Element,fmtTime:v=>v?'time:'+v:'—',
+    const sandbox=vm.createContext({document,window:viewport,Node:Element,URLSearchParams,fmtTime:v=>v?'time:'+v:'—',copyToken:async token=>copies.push(token),
+        openDialog:async options=>{if(options.build)options.build(new Element('div'));return options.submit?await options.submit():true},
         setTimeout(fn,delay){assert.equal(delay,3000);timers.set(++timerId,fn);peakTimers=Math.max(peakTimers,timers.size);return timerId},
         clearTimeout(id){if(timers.delete(id))cleared++},
-        async api(path,method='GET'){calls.push({path,method});assert.ok(responses.length,'unexpected API request');const response=responses.shift();return typeof response==='function'?await response():await response}
+        async api(path,method='GET',data){calls.push({path,method,data});assert.ok(responses.length,'unexpected API request');const response=responses.shift();return typeof response==='function'?await response():await response}
     });
-    vm.runInContext("let currentPage='概览';const content=document.getElementById('content'),msg=document.getElementById('message');\n"+domHelpers+domainCode+showCode+"\nconst render={'入口域名':domainPage,'概览':async()=>content.append(node('p','overview'))};",sandbox);
-    return {timers,responses,calls,viewport,elements,sandbox,get peakTimers(){return peakTimers},get cleared(){return cleared},
+    const extra=management?script.slice(script.indexOf('const stateLabels='),script.indexOf('function node('))+script.slice(script.indexOf('function tokenView('),script.indexOf('async function overview('))+script.slice(script.indexOf('async function analysis('),script.indexOf('async function rules('))+script.slice(script.indexOf('function publishNotice('),script.indexOf('// One reusable component')):'';
+    vm.runInContext("let tokenGroupFilter='',tokenPageNumber=1,currentPage='概览';const content=document.getElementById('content'),msg=document.getElementById('message');\n"+domHelpers+domainCode+showCode+extra+"\nconst render={'入口域名':domainPage,'概览':async()=>content.append(node('p','overview'))"+(management?",'Token':tokenPage,'分析':analysis,'日志':logs":"")+"};",sandbox);
+    return {timers,responses,calls,viewport,elements,sandbox,copies,get peakTimers(){return peakTimers},get cleared(){return cleared},
         evaluate:code=>vm.runInContext(code,sandbox),show:page=>vm.runInContext(`show(${JSON.stringify(page)})`,sandbox),
         async mount(data){responses.push(data);await this.show('入口域名');return document.getElementById('domain-table')},
         async tick(){const timer=timers.entries().next().value;if(!timer)return;timers.delete(timer[0]);await timer[1]()},
@@ -192,5 +198,77 @@ await domainCheck('slow GET never overlaps the next poll',async()=>{
 });
 await domainCheck('GET failure preserves the table/message and retries a known pending task',async()=>{
     const h=domainHarness(),container=await h.mount(domainData('PENDING'));h.elements.get('message').textContent='keep notice';h.responses.push(()=>{throw Error('network failure')});await h.tick();assert.equal(container.replaceCalls,1);assert.equal(h.elements.get('message').textContent,'keep notice');assert.equal(h.timers.size,1);h.responses.push(domainData('ACTIVE'));await h.tick();assert.equal(h.timers.size,0);
+});
+const managementTracking={tracking:{groups:[
+    {id:9,path:'3.10',status:'ACTIVE',has_active_children:0},
+    {id:8,path:'3.1.2',status:'ACTIVE',has_active_children:0},
+    {id:3,path:'3',status:'ACTIVE',has_active_children:1},
+    {id:7,path:'3.1',status:'ACTIVE',has_active_children:1},
+    {id:6,path:'3.1.1',status:'ACTIVE',has_active_children:0},
+    {id:4,path:'3.2',status:'ACTIVE',has_active_children:0},
+    {id:10,path:'3.3',status:'DRAFT',has_active_children:0}
+]}};
+function tokenResult(page=1,has_next=false,count=1){return {page,has_next,rows:Array.from({length:count},(_,i)=>({
+    id:(page-1)*50+i+1,token:((page-1)*50+i+1).toString(16).padStart(32,'0'),health:100,labels:[],
+    tracking_group_path:'3.1.2',requests_1m:1,requests_5m:2,requests_1h:3,requests_24h:4,ips_24h:1,uas_24h:1,errors_24h:0,last_ip:'192.0.2.2',last_ua:'Client/1',last_seen:12345,state:'NORMAL'
+}))}}
+function walk(element){return [element,...element.children.flatMap(walk)]}
+function tagged(h,tag){return walk(h.content).filter(element=>element.tagName===tag)}
+function button(h,text){const found=tagged(h,'button').find(element=>element.textContent===text);assert.ok(found,'missing button '+text);return found}
+function tokenQuery(h){return new URLSearchParams(h.calls.filter(call=>call.path.startsWith('analysis/tokens?')).at(-1).path.split('?')[1])}
+function logQuery(h){return new URLSearchParams(h.calls.filter(call=>call.path.startsWith('logs?')).at(-1).path.split('?')[1])}
+async function mountTokens(h,page=1,next=false,count=1){h.evaluate(`tokenPageNumber=${page}`);h.responses.push(managementTracking,tokenResult(page,next,count));await h.show('Token')}
+await domainCheck('Token first-page controls and original layout/actions',async()=>{
+    const h=domainHarness(true);await mountTokens(h,1,true,50);assert.equal(button(h,'上一页').disabled,true);assert.equal(button(h,'下一页').disabled,false);assert.equal(tokenQuery(h).get('limit'),'50');assert.equal(tokenQuery(h).get('page'),'1');
+    assert.equal(tagged(h,'tbody')[0].children.length,50);
+    for(const text of ['完整 Token','手动添加','入口组筛选：','健康度','1m','5m','1h','24h','最后IP','最后UA','风险','操作','临时封禁','永久封禁','白名单','详情','解封'])assert.ok(h.content.textContent.includes(text),text);
+});
+await domainCheck('Token last-page next is disabled and cannot request empty next page',async()=>{
+    const h=domainHarness(true);await mountTokens(h,3,false);assert.equal(button(h,'上一页').disabled,false);assert.equal(button(h,'下一页').disabled,true);const calls=h.calls.length;await button(h,'下一页').onclick();assert.equal(h.calls.length,calls);
+});
+await domainCheck('Token next-page click keeps group filter',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8'");await mountTokens(h,1,true);h.responses.push(managementTracking,tokenResult(2,true));await button(h,'下一页').onclick();assert.equal(tokenQuery(h).get('page'),'2');assert.equal(tokenQuery(h).get('group_id'),'8');assert.equal(tagged(h,'select').at(-1).value,'8');
+});
+await domainCheck('Token previous-page click keeps group filter',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8'");await mountTokens(h,2,true);h.responses.push(managementTracking,tokenResult(1,true));await button(h,'上一页').onclick();assert.equal(tokenQuery(h).get('page'),'1');assert.equal(tokenQuery(h).get('group_id'),'8');assert.equal(button(h,'上一页').disabled,true);
+});
+await domainCheck('Changing Token group resets to first page',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8'");await mountTokens(h,3,false);const select=tagged(h,'select').at(-1);select.value='6';h.responses.push(managementTracking,tokenResult(1,true));await select.onchange();assert.equal(tokenQuery(h).get('page'),'1');assert.equal(tokenQuery(h).get('group_id'),'6');assert.equal(h.evaluate('tokenPageNumber'),1);
+});
+for(const [label,state] of [['白名单','WHITELIST'],['永久封禁','BLOCKED'],['临时封禁','TEMP_BLOCKED'],['解封','NORMAL']])await domainCheck('Token '+state+' action keeps current page/group',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8'");await mountTokens(h,2,true);h.responses.push({ok:true,publish:{applied:true}},managementTracking,tokenResult(2,true));await button(h,label).onclick();const mutation=h.calls.find(call=>call.method==='PATCH');assert.equal(mutation.path,'tokens/51/state');assert.equal(mutation.data.state,state);if(state==='TEMP_BLOCKED')assert.ok(mutation.data.expires_at>Date.now()/1000);assert.equal(tokenQuery(h).get('page'),'2');assert.equal(tokenQuery(h).get('group_id'),'8');
+});
+await domainCheck('Manual Token addition resets first page without changing group',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8'");await mountTokens(h,2,true);tagged(h,'input')[0].value='0123456789abcdef0123456789abcdef';h.responses.push({ok:true,publish:{applied:true}},managementTracking,tokenResult(1,true));await button(h,'手动添加').onclick();assert.equal(tokenQuery(h).get('page'),'1');assert.equal(tokenQuery(h).get('group_id'),'8');assert.equal(h.calls.find(call=>call.method==='POST').data.token,'0123456789abcdef0123456789abcdef');
+});
+await domainCheck('Empty current Token page falls back to previous page',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8';tokenPageNumber=2");h.responses.push(managementTracking,tokenResult(2,false,0),tokenResult(1,false,2));await h.show('Token');assert.equal(tokenQuery(h).get('page'),'1');assert.equal(tokenQuery(h).get('group_id'),'8');assert.equal(h.calls.filter(call=>call.path.startsWith('analysis/')).length,2);assert.equal(h.evaluate('tokenPageNumber'),1);
+});
+await domainCheck('Disappeared Token group has bounded fallback instead of infinite empty pages',async()=>{
+    const h=domainHarness(true);h.evaluate("tokenGroupFilter='8';tokenPageNumber=8");h.responses.push(managementTracking,tokenResult(8,false,0),tokenResult(7,false,0),tokenResult(1,false,0));await h.show('Token');assert.equal(h.calls.filter(call=>call.path.startsWith('analysis/')).length,3);assert.equal(h.evaluate('tokenPageNumber'),1);assert.equal(button(h,'下一页').disabled,true);
+});
+await domainCheck('Analysis stays first-page recent-50 view without pagination UI',async()=>{
+    const h=domainHarness(true);h.evaluate('tokenPageNumber=5');h.responses.push(tokenResult(1,true));await h.show('分析');assert.equal(tokenQuery(h).get('limit'),'50');assert.equal(tokenQuery(h).has('page'),false);assert.ok(h.content.textContent.includes('最近50个 Token'));assert.ok(!tagged(h,'button').some(element=>['上一页','下一页'].includes(element.textContent)));assert.equal(h.content.children.length,2);
+});
+await domainCheck('Token complete-value double-click copy is unchanged',async()=>{
+    const h=domainHarness(true);await mountTokens(h);const token=walk(h.content).find(element=>element.className==='token-full');await token.ondblclick();assert.equal(token.textContent,'1'.padStart(32,'0'));assert.deepEqual(h.copies,['1'.padStart(32,'0')]);
+});
+const logResult=page=>({result:{page,rows:[{created_at:12345,token:'1'.padStart(32,'0'),tracking_group_path:'3.1.2',client_ip:'192.0.2.2',user_agent:'Client/1',status_code:403,decision:'TOKEN_BLOCKED',request_path:'/api/v1/test/subscribe'}]}});
+async function mountLogs(h){h.responses.push(managementTracking,logResult(1));await h.show('日志')}
+await domainCheck('Log group dropdown includes parents in natural path order',async()=>{
+    const h=domainHarness(true);await mountLogs(h);assert.deepEqual(tagged(h,'select').at(-1).children.map(option=>option.textContent),['全部入口组','3','3.1','3.1.1','3.1.2','3.2','3.10']);assert.equal(logQuery(h).has('group_id'),false);assert.ok(tagged(h,'th').some(element=>element.textContent==='入口组'));assert.ok(h.content.textContent.includes('3.1.2'));
+});
+await domainCheck('Log group query combines all existing filters',async()=>{
+    const h=domainHarness(true);await mountLogs(h);const inputs=tagged(h,'input'),selects=tagged(h,'select');inputs[0].value='1'.padStart(32,'0');inputs[1].value='192.0.2.2';inputs[2].value='Client/1';selects[0].value='7d';selects[1].value='403';selects[2].value='TOKEN_BLOCKED';selects[3].value='7';h.responses.push(logResult(1));await button(h,'查询').onclick();const query=logQuery(h);
+    for(const [key,value] of Object.entries({group_id:'7',token:'1'.padStart(32,'0'),ip:'192.0.2.2',ua:'Client/1',window:'7d',status:'403',decision:'TOKEN_BLOCKED',page:'1'}))assert.equal(query.get(key),value);
+});
+await domainCheck('Log next and previous pages preserve selected group and filters',async()=>{
+    const h=domainHarness(true);await mountLogs(h);tagged(h,'select').at(-1).value='7';tagged(h,'input')[1].value='192.0.2.2';h.responses.push(logResult(2));await button(h,'下一页').onclick();assert.equal(logQuery(h).get('page'),'2');assert.equal(logQuery(h).get('group_id'),'7');assert.equal(logQuery(h).get('ip'),'192.0.2.2');h.responses.push(logResult(1));await button(h,'上一页').onclick();assert.equal(logQuery(h).get('page'),'1');assert.equal(logQuery(h).get('group_id'),'7');
+});
+await domainCheck('Log query after group change starts first page',async()=>{
+    const h=domainHarness(true);await mountLogs(h);h.responses.push(logResult(2));await button(h,'下一页').onclick();h.responses.push(logResult(3));await button(h,'下一页').onclick();tagged(h,'select').at(-1).value='6';h.responses.push(logResult(1));await button(h,'查询').onclick();assert.equal(logQuery(h).get('page'),'1');assert.equal(logQuery(h).get('group_id'),'6');
+});
+await domainCheck('Late Token page response cannot append onto another page',async()=>{
+    const h=domainHarness(true),request=deferred();h.responses.push(managementTracking,request.promise);const old=h.show('Token');await Promise.resolve();await h.show('概览');request.resolve(tokenResult(1,true));await old;assert.equal(h.content.textContent,'overview');
 });
 console.log(`PASS: ${passed} tracking/domain UI JavaScript checks`);
