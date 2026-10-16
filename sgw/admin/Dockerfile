@@ -30,4 +30,6 @@ RUN chmod 0755 /usr/local/bin/subscription-gateway-admin \
     && chown -R www-data:www-data /data /control /domain-certs \
     && chmod 0750 /data /control /run/nginx
 
+# PID1 is the shell supervisor, not the base image's php-fpm (which uses SIGQUIT).
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/subscription-gateway-admin"]

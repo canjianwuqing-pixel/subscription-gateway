@@ -5,6 +5,9 @@ worker_checks=0
 worker_pass() { worker_checks=$((worker_checks+1)); printf 'PASS WORKER %02d: %s\n' "$worker_checks" "$1"; }
 worker_secret=SGW_TEST_CF_SECRET_NEVER_LOG_987654321
 admin_id=$(compose ps -q admin)
+stop_signal=$(docker inspect --format '{{.Config.StopSignal}}' "$admin_id")
+[[ $stop_signal == SIGTERM ]] || fail 'Admin image stop signal does not match the shell supervisor TERM trap'
+printf 'Admin image stop signal=%s\n' "$stop_signal"
 health_code() {
     compose exec -T admin php -r '$c=curl_init("http://127.0.0.1:8080/healthz");curl_setopt($c,CURLOPT_RETURNTRANSFER,true);curl_exec($c);echo curl_getinfo($c,CURLINFO_RESPONSE_CODE);'
 }
