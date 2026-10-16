@@ -107,7 +107,10 @@ domain_pass 'wrong SAN never activates an alias'
 # Intercept only the reload command; nginx -t and TLS server remain real. Failure is one-shot, then restore reload works.
 docker cp "$root/tests/ci_nginx_fault.sh" "$gateway_id:/tmp/ci_nginx_fault.sh"
 compose exec -T gateway sh -c 'mv /usr/sbin/nginx /usr/sbin/nginx.real; cp /tmp/ci_nginx_fault.sh /usr/sbin/nginx; chmod 755 /usr/sbin/nginx'
-inject_gateway_failure() { compose exec -T gateway sh -c "touch /tmp/ci-$1-once"; }
+inject_gateway_failure() {
+    # Prove unrelated primary/rule reloads cannot steal this one-shot alias failure.
+    compose exec -T gateway sh -ec 'touch "/tmp/ci-$1-once"; nginx -t >/dev/null 2>&1; nginx -s reload >/dev/null 2>&1; test -f "/tmp/ci-$1-once"' sh "$1"
+}
 inject_gateway_failure test
 add_alias rejected.example.net aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 rejected_alias=$alias_id;domain_wait "$rejected_alias" ERROR
