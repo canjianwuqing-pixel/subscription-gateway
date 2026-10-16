@@ -188,7 +188,7 @@ test_case('Actual certificate worker process survives real DB contention and con
         expect_true(str_contains((string) file_get_contents($root . '/sgw/admin/src/certificate_worker.php'), 'sleep(2)'));
     } finally {
         if ($holder) contention_release($holder);
-        if ($worker) { proc_terminate($worker['process']); foreach ($worker['pipes'] as $pipe) fclose($pipe); proc_close($worker['process']); }
+        if ($worker) { proc_terminate($worker['process']); foreach ($worker['pipes'] as $pipe) { if (is_resource($pipe)) fclose($pipe); } proc_close($worker['process']); }
         contention_restore_env('DATABASE_PATH', $oldDb); contention_restore_env('CONTROL_DIR', $oldControl);
     }
 });
