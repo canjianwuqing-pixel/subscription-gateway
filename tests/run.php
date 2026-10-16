@@ -534,6 +534,7 @@ require __DIR__ . '/schema_v6.php';
 require __DIR__ . '/tracking_ui.php';
 require __DIR__ . '/domains.php';
 require __DIR__ . '/analytics_pagination.php';
+require __DIR__ . '/sqlite_contention.php';
 
 if ($failed === 0) {
     echo "PASS: {$passed} tests\n";

@@ -38,12 +38,37 @@ printf '%s\n' "$cert_worker_pid" > /run/certificate-worker.pid
 chown root:www-data /run/certificate-worker.pid
 chmod 0640 /run/certificate-worker.pid
 
-trap 'kill "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid" 2>/dev/null || true; wait "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid" 2>/dev/null || true; exit 0' TERM INT
-if wait -n "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid"; then
-    exit_status=1
-else
-    exit_status=$?
-fi
-kill "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid" 2>/dev/null || true
-wait "$fpm_pid" "$nginx_pid" "$worker_pid" "$cert_worker_pid" 2>/dev/null || true
-exit "$exit_status"
+children="$fpm_pid $nginx_pid $worker_pid $cert_worker_pid"
+process_alive() {
+    kill -0 "$1" 2>/dev/null || return 1
+    IFS= read -r process_stat 2>/dev/null < "/proc/$1/stat" || return 1
+    case ${process_stat##*) } in Z*|X*) return 1;; esac
+}
+stop_children() {
+    trap '' TERM INT
+    kill $children 2>/dev/null || true
+    # Bound shutdown below Docker's normal stop timeout; reap every direct child.
+    shutdown_tick=0
+    while [ "$shutdown_tick" -lt 5 ]; do
+        remaining=no
+        for child in $children; do if process_alive "$child"; then remaining=yes; fi; done
+        [ "$remaining" = yes ] || break
+        sleep 1
+        shutdown_tick=$((shutdown_tick + 1))
+    done
+    for child in $children; do if process_alive "$child"; then kill -KILL "$child" 2>/dev/null || true; fi; done
+    for child in $children; do wait "$child" 2>/dev/null || true; done
+}
+trap 'stop_children; exit 0' TERM INT
+# BusyBox ash versions differ in wait -n with multiple PID operands. Explicitly
+# inspect each critical child instead of accidentally waiting for all four.
+while :; do
+    for child in $children; do
+        if ! process_alive "$child"; then
+            echo 'Critical Admin child exited; restarting container' >&2
+            stop_children
+            exit 1
+        fi
+    done
+    sleep 1
+done

@@ -39,7 +39,8 @@ try {
     } elseif ($command === 'domain-check') {
         $status=domain_installation_check($pdo);
         $pid=trim((string)@file_get_contents('/run/certificate-worker.pid'));
-        if(!ctype_digit($pid)||!is_dir('/proc/'.$pid)) throw new RuntimeException('Certificate worker unavailable');
+        $stat=ctype_digit($pid)?@file_get_contents('/proc/'.$pid.'/stat'):false;
+        if(!is_string($stat)||preg_match('/\) [ZX] /',$stat)||!is_file('/control/certificate-worker.ready')) throw new RuntimeException('Certificate worker unavailable');
         echo 'DOMAINS_OK schema=',$status['schema'],' active_aliases=',$status['active_aliases'],' worker=ready',PHP_EOL;
     } elseif ($command === 'migrate') {
         echo 'MIGRATED', PHP_EOL;

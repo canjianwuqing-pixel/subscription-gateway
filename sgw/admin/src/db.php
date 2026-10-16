@@ -130,10 +130,11 @@ function open_database(string $path): PDO
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES => false,
     ]);
+    // Bound lock waits during connection setup as well as normal queries.
+    $pdo->exec('PRAGMA busy_timeout=5000');
     $pdo->exec('PRAGMA journal_mode=WAL');
     $pdo->exec('PRAGMA synchronous=NORMAL');
     $pdo->exec('PRAGMA foreign_keys=ON');
-    $pdo->exec('PRAGMA busy_timeout=5000');
     $expected = [
         'journal_mode' => 'wal',
         'synchronous' => 1,
@@ -532,6 +533,40 @@ SQL);
     return (int) setting_get($pdo, 'config_version', '0');
 }
 
+function sqlite_is_busy(Throwable $error): bool
+{
+    if (!$error instanceof PDOException) return false;
+    $driverCode = $error->errorInfo[1] ?? null;
+    if (is_int($driverCode) || (is_string($driverCode) && ctype_digit($driverCode))) {
+        // Extended SQLite result codes retain the primary code in the low byte.
+        return in_array(((int) $driverCode) & 0xff, [5, 6], true);
+    }
+    return preg_match('/\bdatabase (?:table )?is locked\b/i', $error->getMessage()) === 1;
+}
+
+function sqlite_begin_immediate(PDO $pdo): void
+{
+    $timeout = (int) $pdo->query('PRAGMA busy_timeout')->fetchColumn();
+    $changedTimeout = false;
+    try {
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            try {
+                $pdo->exec('BEGIN IMMEDIATE');
+                return;
+            } catch (PDOException $error) {
+                if (!sqlite_is_busy($error) || $attempt === 2) throw $error;
+                // The first attempt already used the connection's busy_timeout (normally 5s).
+                // Retry only lock acquisition, without adding two more 5s waits.
+                $pdo->exec('PRAGMA busy_timeout=0');
+                $changedTimeout = true;
+                usleep([100000, 250000][$attempt]);
+            }
+        }
+    } finally {
+        if ($changedTimeout) $pdo->exec('PRAGMA busy_timeout=' . $timeout);
+    }
+}
+
 function write_transaction(PDO $pdo, callable $callback): mixed
 {
     static $active = null;
@@ -539,7 +574,7 @@ function write_transaction(PDO $pdo, callable $callback): mixed
     if (isset($active[$pdo]) || $pdo->inTransaction()) {
         return $callback();
     }
-    $pdo->exec('BEGIN IMMEDIATE');
+    sqlite_begin_immediate($pdo);
     $active[$pdo] = true;
     try {
         $result = $callback();

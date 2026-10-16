@@ -12,7 +12,7 @@ class MockHandler(BaseHTTPRequestHandler):
             return 200, 'application/json', json.dumps({'success': True, 'result': rows}).encode()
         if self.path.startswith('/cf/zones/'):
             zone_id = urlparse(self.path).path.split('/')[3]
-            if self.headers.get('Authorization') != 'Bearer known_Cloudflare_secret_DO_NOT_PERSIST_9876':
+            if self.headers.get('Authorization') not in ('Bearer known_Cloudflare_secret_DO_NOT_PERSIST_9876', 'Bearer SGW_TEST_CF_SECRET_NEVER_LOG_987654321'):
                 return 403, 'application/json', b'{"success":false}'
             if '/dns_records' in self.path:
                 return 200, 'application/json', b'{"success":true,"result":[]}'

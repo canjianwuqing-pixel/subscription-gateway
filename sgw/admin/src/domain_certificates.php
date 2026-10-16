@@ -321,11 +321,16 @@ function domain_process_one(PDO $pdo,?callable $issuer=null,?callable $publisher
         }
         $attempts=(int)$job['attempts']+1; $retry=$now+min(86400,300*(2**min($attempts-1,8)));
         $status=$job['operation']==='REMOVE'?$job['previous_status']:($renew?'ACTIVE':'ERROR');
-        write_transaction($pdo,static function()use($pdo,$id,$message,$status,$attempts,$retry,$now,$job):void{
+        try { write_transaction($pdo,static function()use($pdo,$id,$message,$status,$attempts,$retry,$now,$job):void{
             $pdo->prepare('UPDATE gateway_domains SET status=?,last_error=?,updated_at=? WHERE id=?')->execute([$status,$message,$now,$id]);
             $pdo->prepare("UPDATE certificate_jobs SET state=?,attempts=?,next_retry_at=?,last_error=?,release=NULL,previous_release=NULL,request_id=NULL,request_sha=NULL,updated_at=? WHERE domain_id=?")
                 ->execute([$job['operation']==='REMOVE'?'DONE':'RETRY',$attempts,$retry,$message,$now,$id]);
-        });
+        }); } catch(Throwable $recoveryError) {
+            // Preserve the original safe business category even if recording ERROR/RETRY is locked.
+            // Do not log ACME/CF exception messages or credentials; RUNNING remains restartable.
+            error_log('Certificate job failure state pending: '.match($job['operation']) {'REMOVE'=>'REMOVE_FAILED','RENEW'=>'RENEW_FAILED',default=>'ISSUE_FAILED'});
+            throw $recoveryError;
+        }
     }
     return true;
 }

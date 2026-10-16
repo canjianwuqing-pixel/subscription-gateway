@@ -929,6 +929,7 @@ jq -e '.tracking.source_stats.current==5 and any(.tracking.sources[]; .source_ho
 db tracking-mode off
 publish
 . "$root/tests/ci_domains.sh"
+. "$root/tests/ci_worker_supervisor.sh"
 unset admin_csrf
 printf 'PASS: real HTTP source add/rename/physical purge/auth/CSRF, relearn NULL targets, 6-to-5 lifecycle, partial URI/Base64/YAML, safe references, all-filtered 503, failed/HEAD snapshots and unchanged assignments\n'
 printf 'PASS: real Linux Docker, Nginx, mock upstream, rules, expiry, logs and permissions\n'
