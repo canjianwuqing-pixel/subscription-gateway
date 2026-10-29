@@ -4,6 +4,29 @@
 
 ## 状态与安装
 
+### 快速安装 / 检查 / 更新
+
+全新 Debian/Ubuntu 服务器请使用 root 执行以下一键安装命令：
+
+```bash
+apt-get update && apt-get install -y git && git clone https://github.com/canjianwuqing-pixel/subscription-gateway.git /opt/subscription-gateway && cd /opt/subscription-gateway && chmod 0755 setup.sh update.sh && ./setup.sh
+```
+
+安装完成后检查运行状态：
+
+```bash
+cd /opt/subscription-gateway && bash ./setup.sh --check
+```
+
+以后从 GitHub 拉取最新版本并安全更新：
+
+```bash
+cd /opt/subscription-gateway && bash ./update.sh --pull
+```
+
+首次安装过程中会交互填写 Gateway 主域名、Admin 端口、管理员用户名和证书方式。使用 Cloudflare DNS-01 时选择 `2`，然后按提示输入 Cloudflare API Token 和 Zone ID。
+
+
 ### 一实例多入口域名（Schema v7）
 
 首次安装仍只配置主 `GATEWAY_DOMAIN`，主证书继续由宿主机管理 `/runtime/ssl/active`；HTTP-01、Cloudflare DNS-01、existing 模式及原证书命令保持。首次 DNS-CF 安装在 SQLite 就绪后通过 stdin 加密初始化“默认 Cloudflare”凭据；中断恢复时没有原 Token 仅提示稍后在后台添加。
