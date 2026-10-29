@@ -276,6 +276,22 @@ jq -e --arg token "$token" '.detail.token.token == $token and .detail.token.trac
     "$temporary/admin-response" >/dev/null || fail 'Token detail lacks full Token or group'
 pagination_group=$(jq -er '.detail.token.tracking_group_id' "$temporary/admin-response")
 pagination_path=$(jq -er '.detail.token.tracking_group_path' "$temporary/admin-response")
+analysis_ip=$(jq -er '.detail.logs[0].client_ip' "$temporary/admin-response")
+analysis_ua=$(jq -er '.detail.logs[0].user_agent' "$temporary/admin-response")
+admin_request api/analysis/tokens --get --data-urlencode "token=$token" --data-urlencode "ip=$analysis_ip" \
+    --data-urlencode "ua=$analysis_ua" --data-urlencode "group_id=$pagination_group" --data-urlencode 'page=1'
+[[ $admin_code == 200 ]] && jq -e --arg token "$token" '.page==1 and .has_next==false and (.rows|length==1 and all(.token==$token and .token_encrypted==null))' "$temporary/admin-response" >/dev/null \
+    || fail 'Analysis API did not combine exact Token, historical IP/UA and current group filters'
+admin_request "api/analysis/tokens?token=$(openssl rand -hex 16)"
+[[ $admin_code == 200 ]] && jq -e '.rows==[] and .has_next==false' "$temporary/admin-response" >/dev/null || fail 'Analysis unknown exact Token was not empty'
+admin_request api/analysis/tokens --get --data-urlencode 'ua=%'
+[[ $admin_code == 200 ]] && jq -e '.rows==[]' "$temporary/admin-response" >/dev/null || fail 'Analysis UA percent became a wildcard'
+for query in 'token=partial' 'token%5B%5D=1' 'ip=999.1.2.3' 'ip=192.0.2.1%2F32' 'ip%5B%5D=1' 'ua%5B%5D=1' "ua=$(printf '%0257d' 0)"; do
+    admin_request "api/analysis/tokens?$query"
+    [[ $admin_code == 422 ]] && jq -e '.ok==false and (.error|test("[一-龥]")) and (.error|test("PDO|SQLSTATE|/app/")|not)' "$temporary/admin-response" >/dev/null \
+        || fail 'Analysis invalid search did not return a safe Chinese validation error'
+done
+printf 'PASS: real authenticated analysis search, combinations, literal UA and safe validation errors\n'
 admin_request "api/analysis/tokens?limit=50&page=1&group_id=$pagination_group"
 [[ $admin_code == 200 ]] && jq -e --arg token "$token" '.page==1 and .has_next==false and (.rows|any(.token==$token)) and (.rows|all(.token_encrypted==null and .sort_seen==null))' "$temporary/admin-response" >/dev/null \
     || fail 'Token pagination API metadata or fields incorrect'

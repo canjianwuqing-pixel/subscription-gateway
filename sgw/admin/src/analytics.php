@@ -66,9 +66,37 @@ function token_analysis_page(PDO $pdo, array $filters = []): array
     $limit = min(50, analytics_positive_integer($filters['limit'] ?? 50, PHP_INT_MAX, 'Invalid limit filter'));
     $trackingGroupId = isset($filters['group_id']) && $filters['group_id'] !== ''
         ? analytics_positive_integer($filters['group_id'], PHP_INT_MAX, 'Invalid tracking group filter') : null;
+    $where = [];
+    $params = [];
+    $token = $filters['token'] ?? '';
+    if (!is_string($token)) throw new InvalidArgumentException('Token must be 32 lowercase hexadecimal characters');
+    if ($token !== '') {
+        validate_token_format($token);
+        $where[] = 't.token_hash = :analysis_token_hash';
+        $params[':analysis_token_hash'] = token_hash_value($token);
+    }
+    $ip = $filters['ip'] ?? '';
+    if (!is_string($ip) || ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false)) {
+        throw new InvalidArgumentException('Invalid analysis IP filter');
+    }
+    if ($ip !== '') {
+        $where[] = 'EXISTS (SELECT 1 FROM access_logs match_ip WHERE match_ip.token_id = t.id AND match_ip.client_ip = :analysis_ip)';
+        $params[':analysis_ip'] = $ip;
+    }
+    $ua = $filters['ua'] ?? '';
+    if (!is_string($ua) || str_contains($ua, "\0")) throw new InvalidArgumentException('Invalid analysis UA filter');
+    if (strlen($ua) > 256) throw new InvalidArgumentException('Analysis search is too long');
+    if ($ua !== '') {
+        $where[] = "EXISTS (SELECT 1 FROM access_logs match_ua WHERE match_ua.token_id = t.id AND LOWER(match_ua.user_agent) LIKE LOWER(:analysis_ua) ESCAPE '\\')";
+        $params[':analysis_ua'] = '%' . strtr($ua, ['\\' => '\\\\', '%' => '\\%', '_' => '\\_']) . '%';
+    }
+    if ($trackingGroupId !== null) {
+        $where[] = 'a.group_id = :tracking_group_id';
+        $params[':tracking_group_id'] = $trackingGroupId;
+    }
     tracking_backfill_token_assignments($pdo);
     $now = time();
-    $groupFilter = $trackingGroupId === null ? '' : 'WHERE a.group_id = :tracking_group_id';
+    $groupFilter = $where ? 'WHERE ' . implode(' AND ', $where) : '';
     $query = $pdo->prepare(<<<SQL
 WITH recent AS (
     SELECT t.id, t.token_encrypted, t.state, t.expires_at, t.first_seen, t.last_seen, t.request_count,
@@ -97,8 +125,8 @@ SQL);
         ':h1' => $now - 3600, ':h24' => $now - 86400] as $key => $value) {
         $query->bindValue($key, $value, PDO::PARAM_INT);
     }
-    if ($trackingGroupId !== null) {
-        $query->bindValue(':tracking_group_id', $trackingGroupId, PDO::PARAM_INT);
+    foreach ($params as $key => $value) {
+        $query->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
     }
     $query->execute();
     $rows = $query->fetchAll();

@@ -195,4 +195,118 @@ test_case('Pagination and group queries preserve schema, log data and assignment
     expect_same($logs, $pagingDb->query('SELECT * FROM access_logs ORDER BY id')->fetchAll()); expect_same($assignments, $pagingDb->query('SELECT * FROM tracking_assignments ORDER BY token_hash')->fetchAll());
     expect_same([], $pagingDb->query('PRAGMA foreign_key_check')->fetchAll()); expect_same(['ok'], $pagingDb->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN));
 });
+// Older retained logs must participate in search without changing the 24h risk algorithm.
+$searchBaseline = token_analysis_page($pagingDb);
+for ($i = 1; $i <= 120; $i++) {
+    $log->execute([$i, '220.196.227.196', 'Shadowrocket/3445 CFNetwork/1', '/', 200, 'PASS', $pagingNow - 10 * 86400]);
+    if ($i <= 110) $log->execute([$i, '198.51.100.8', 'Curl/8.7.1', '/', 200, 'PASS', $pagingNow - 11 * 86400]);
+}
+$log->execute([121, '198.51.100.121', 'literal%_\\Agent', '/', 200, 'PASS', $pagingNow - 10 * 86400]);
+$log->execute([122, '198.51.100.122', 'literalXZAgent', '/', 200, 'PASS', $pagingNow - 10 * 86400]);
+function analysis_search_ids(PDO $db, array $filters): array
+{
+    $ids = [];
+    for ($page = 1; $page <= 10; $page++) {
+        $result = token_analysis_page($db, $filters + ['page' => $page]);
+        array_push($ids, ...array_column($result['rows'], 'id'));
+        if (!$result['has_next']) break;
+    }
+    return $ids;
+}
+test_case('Analysis exact full Token uses the existing hash and returns no ciphertext', function () use ($pagingDb): void {
+    $result = token_analysis_page($pagingDb, ['token' => sprintf('%032x', 1)]);
+    expect_same([1], array_column($result['rows'], 'id')); expect_same(false, $result['has_next']);
+    expect_true(!array_key_exists('token_encrypted', $result['rows'][0]));
+    expect_same([], token_analysis_page($pagingDb, ['token' => str_repeat('f', 32)])['rows']);
+    expect_same([], token_analysis_page($pagingDb, ['token' => sprintf('%032x', 1), 'page' => 2])['rows']);
+});
+foreach (['partial', str_repeat('A', 32), str_repeat('a', 31), str_repeat('a', 33), ['token'], 123, true, "' OR 1=1 --"] as $invalid) {
+    test_case('Analysis rejects malformed full Token ' . json_encode($invalid), function () use ($pagingDb, $invalid): void {
+        expect_exception(static fn () => token_analysis_page($pagingDb, ['token' => $invalid]), InvalidArgumentException::class);
+    });
+}
+test_case('Analysis hash lookup never decrypts unrelated Token rows', function () use ($pagingDb): void {
+    $pagingDb->beginTransaction();
+    try {
+        $pagingDb->exec("UPDATE tokens SET token_encrypted='unreadable nonmatching ciphertext' WHERE id<>1");
+        expect_same([1], array_column(token_analysis_page($pagingDb, ['token' => sprintf('%032x', 1)])['rows'], 'id'));
+    } finally { $pagingDb->rollBack(); }
+});
+test_case('Analysis searches historical IP and UA rather than only last values or 24h logs', function () use ($pagingDb): void {
+    $result = token_analysis_page($pagingDb, ['token' => sprintf('%032x', 1), 'ip' => '220.196.227.196', 'ua' => 'shadowROCKET']);
+    expect_same([1], array_column($result['rows'], 'id'));
+    expect_true($result['rows'][0]['last_ip'] !== '220.196.227.196'); expect_true(!str_contains($result['rows'][0]['last_ua'], 'Shadowrocket'));
+    expect_same([], token_analysis_page($pagingDb, ['ip' => '220.196.227.19'])['rows']);
+});
+foreach (['220.196.227', '999.196.227.196', '220.196.227.196/32', '::1', '220.196.227.196 OR 1=1', ['ip'], 123, true] as $invalid) {
+    test_case('Analysis rejects invalid exact IPv4 ' . json_encode($invalid), function () use ($pagingDb, $invalid): void {
+        expect_exception(static fn () => token_analysis_page($pagingDb, ['ip' => $invalid]), InvalidArgumentException::class);
+    });
+}
+foreach (['%' => [121], '_' => [121], '\\' => [121], 'literal%_\\' => [121], "%' OR 1=1 --" => []] as $needle => $expected) {
+    test_case('Analysis UA literal substring ' . json_encode($needle), function () use ($pagingDb, $needle, $expected): void {
+        expect_same($expected, analysis_search_ids($pagingDb, ['ua' => $needle]));
+    });
+}
+test_case('Analysis UA matching is case insensitive even with case-sensitive LIKE enabled', function () use ($pagingDb): void {
+    $pagingDb->exec('PRAGMA case_sensitive_like=ON');
+    try { expect_same(range(110, 1), analysis_search_ids($pagingDb, ['ua' => 'cURL'])); }
+    finally { $pagingDb->exec('PRAGMA case_sensitive_like=OFF'); }
+});
+foreach ([str_repeat('x', 257), ['ua'], true, 123, "curl\0"] as $invalid) {
+    test_case('Analysis rejects overlong or non-string UA ' . json_encode($invalid), function () use ($pagingDb, $invalid): void {
+        expect_exception(static fn () => token_analysis_page($pagingDb, ['ua' => $invalid]), InvalidArgumentException::class);
+    });
+}
+test_case('Analysis accepts the 256-byte UA boundary', function () use ($pagingDb): void {
+    expect_same([], token_analysis_page($pagingDb, ['ua' => str_repeat('x', 256)])['rows']);
+});
+foreach ([['ip' => '220.196.227.196'], ['ua' => 'SHADOWrocket'], ['ua' => 'curl'], ['ip' => '220.196.227.196', 'ua' => 'curl']] as $filters) {
+    test_case('Analysis SQL-filtered pagination preserves order and uniqueness for ' . json_encode($filters), function () use ($pagingDb, $filters): void {
+        $maximum = ($filters['ua'] ?? '') === 'curl' ? 110 : 120;
+        $first = token_analysis_page($pagingDb, $filters); $second = token_analysis_page($pagingDb, $filters + ['page' => 2]);
+        expect_same(50, count($first['rows'])); expect_same(50, count($second['rows'])); expect_same(true, $first['has_next']); expect_same(true, $second['has_next']);
+        expect_same([], array_values(array_intersect(array_column($first['rows'], 'id'), array_column($second['rows'], 'id'))));
+        expect_same(range($maximum, 1), analysis_search_ids($pagingDb, $filters));
+        $last = token_analysis_page($pagingDb, $filters + ['page' => 3]); expect_same(false, $last['has_next']); expect_same(range($maximum - 100, 1), array_column($last['rows'], 'id'));
+    });
+}
+foreach ([
+    [['token' => sprintf('%032x', 1)], [1]],
+    [['ip' => '220.196.227.196'], range(105, 1)],
+    [['ua' => 'shadowrocket'], range(105, 1)],
+    [['token' => sprintf('%032x', 1), 'ip' => '220.196.227.196', 'ua' => 'curl'], [1]],
+] as [$filters, $expected]) {
+    test_case('Analysis exact current group combines with ' . json_encode($filters), function () use ($pagingDb, $pagingGroups, $filters, $expected): void {
+        expect_same($expected, analysis_search_ids($pagingDb, $filters + ['group_id' => $pagingGroups['3.1.1']]));
+        if (isset($filters['token'])) expect_same([], analysis_search_ids($pagingDb, $filters + ['group_id' => $pagingGroups['3.1.2']]));
+    });
+}
+test_case('Analysis searches follow assignment movement without a historical group snapshot', function () use ($pagingDb, $pagingGroups): void {
+    $pagingDb->beginTransaction();
+    try {
+        $pagingDb->prepare('UPDATE tracking_assignments SET group_id=? WHERE token_hash=?')->execute([$pagingGroups['3.10'], token_hash_value(sprintf('%032x', 1))]);
+        expect_same([], analysis_search_ids($pagingDb, ['token' => sprintf('%032x', 1), 'group_id' => $pagingGroups['3.1.1']]));
+        expect_same([1], analysis_search_ids($pagingDb, ['token' => sprintf('%032x', 1), 'ua' => 'curl', 'group_id' => $pagingGroups['3.10']]));
+    } finally { $pagingDb->rollBack(); }
+});
+test_case('Analysis historical search leaves default rows and risk algorithms unchanged', function () use ($pagingDb, $searchBaseline): void {
+    expect_same($searchBaseline, token_analysis_page($pagingDb));
+    expect_same(token_analysis_rows($pagingDb), token_analysis_page($pagingDb, ['token' => '', 'ip' => '', 'ua' => '', 'group_id' => ''])['rows']);
+});
+test_case('Analysis filtered queries preserve v7 schema, retained logs, and assignments', function () use ($pagingDb): void {
+    $schema = $pagingDb->query('SELECT name,sql FROM sqlite_master ORDER BY name')->fetchAll();
+    $logs = $pagingDb->query('SELECT * FROM access_logs ORDER BY id')->fetchAll();
+    $assignments = $pagingDb->query('SELECT * FROM tracking_assignments ORDER BY token_hash')->fetchAll();
+    token_analysis_page($pagingDb, ['ip' => '220.196.227.196', 'ua' => 'curl', 'page' => 2]);
+    expect_same(7, (int) $pagingDb->query('PRAGMA user_version')->fetchColumn());
+    expect_same($schema, $pagingDb->query('SELECT name,sql FROM sqlite_master ORDER BY name')->fetchAll());
+    expect_same($logs, $pagingDb->query('SELECT * FROM access_logs ORDER BY id')->fetchAll());
+    expect_same($assignments, $pagingDb->query('SELECT * FROM tracking_assignments ORDER BY token_hash')->fetchAll());
+});
+foreach (['Invalid analysis IP filter', 'Invalid analysis UA filter', 'Analysis search is too long'] as $message) {
+    test_case('Analysis search errors have safe Chinese presentation: ' . $message, static function () use ($message): void {
+        expect_true(preg_match('/\p{Han}/u', admin_error_message($message)) === 1);
+    });
+}
 $pagingDb = null;
