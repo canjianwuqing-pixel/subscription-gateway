@@ -115,6 +115,11 @@ if [[ ${1:-} == --driver ]]; then
         ops-docker) ensure_docker;;
         ops-ports) assert_install_ports 443 64444;;
         ops-http) make_runtime; acquire_certificate http-01 gateway.test;;
+        ops-dns)
+            make_runtime; acquire_certificate dns-cf gateway.test
+            [[ -z ${CF_Token+x} && -z ${CF_Zone_ID+x} ]] || die 'CF environment was not cleared'
+            printf '%s\n%s\n' "$INSTALL_CF_TOKEN" "$INSTALL_CF_ZONE" | sha256sum | cut -d ' ' -f 1 > "$state/cf-bootstrap-hash"
+            unset INSTALL_CF_TOKEN INSTALL_CF_ZONE;;
         ops-existing) make_runtime; acquire_certificate existing gateway.test; register_acme_hook existing gateway.test;;
         ops-renewal) make_runtime; ensure_deploy_hook >/dev/null; acme_renewal_ready gateway.test;;
         ops-cleanup)
@@ -455,6 +460,57 @@ touch "$state/port80"
 printf '%s\n%s\n' "$state/cert.pem" "$state/key.pem" | run ops-existing
 if grep -q '^git\|^crontab\|^apt-get\|^ss ' "$state/calls"; then fail 'existing invoked auto certificate dependencies'; fi
 pass 'actual existing certificate acquisition validates files without cron/ACME/80'
+
+expect grep -Fq "read -r -p 'Cloudflare DNS API Token: ' token" "$root/sgw/ops.sh"
+if grep -Eq 'read .*-[[:alnum:]]*s|stty[[:space:]].*-echo' "$root/sgw/ops.sh"; then fail 'host certificate input still suppresses terminal echo'; fi
+pass 'host Cloudflare input uses ordinary read with no silent option or stty echo suppression'
+cat > "$test_root/dns-acme" <<'DNS_ACME'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'acme %s\n' "$*" >> "$TEST_STATE/calls"
+case $1 in
+    --issue)
+        printf '%s\n%s\n' "${CF_Token:-}" "${CF_Zone_ID:-}" | sha256sum | cut -d ' ' -f 1 > "$TEST_STATE/cf-issue-hash"
+        [[ ! -f $TEST_STATE/acme-fail ]];;
+    --install-cert)
+        [[ -z ${CF_Token+x} && -z ${CF_Zone_ID+x} ]]
+        cp "$TEST_STATE/cert.pem" "$5"; cp "$TEST_STATE/key.pem" "$7";;
+    *) exit 1;;
+esac
+DNS_ACME
+new_dns_state() {
+    new_state "$1"; mkdir "$state/acme"
+    cp "$test_root/dns-acme" "$state/acme/acme.sh"; chmod 0700 "$state/acme/acme.sh"
+}
+dns_test_token=SGW_SETUP_CF_FAKE_ONLY_987654321
+dns_test_zone=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+new_dns_state actual-dns-zone
+printf ' \t%s \t\n \t%s \t\n' "$dns_test_token" "$dns_test_zone" | run ops-dns
+expected_dns_hash=$(printf '%s\n%s\n' "$dns_test_token" "$dns_test_zone" | sha256sum | cut -d ' ' -f 1)
+expect test "$(<"$state/cf-issue-hash")" == "$expected_dns_hash"
+expect test "$(<"$state/cf-bootstrap-hash")" == "$expected_dns_hash"
+expect grep -q '^acme --issue --server letsencrypt --dns dns_cf -d gateway.test$' "$state/calls"
+pass 'actual DNS-CF trims Token/Zone whitespace and retains the stdin bootstrap payload'
+if grep -RFq -- "$dns_test_token" "$state"; then fail 'CF input was echoed or persisted in output/argv/runtime fixtures'; fi
+pass 'visible read never actively prints the Token or writes it to output/argv/runtime fixtures'
+new_dns_state actual-dns-optional-zone
+printf '%s\n\n' "$dns_test_token" | run ops-dns
+expected_dns_hash=$(printf '%s\n\n' "$dns_test_token" | sha256sum | cut -d ' ' -f 1)
+expect test "$(<"$state/cf-issue-hash")" == "$expected_dns_hash"
+expect test "$(<"$state/cf-bootstrap-hash")" == "$expected_dns_hash"
+pass 'actual DNS-CF still accepts a blank optional Zone ID and clears exported credentials'
+new_dns_state actual-dns-empty-token
+if printf ' \t \n' | run ops-dns; then fail 'blank Cloudflare Token accepted'; fi
+expect grep -q 'Cloudflare Token is empty' "$state/output"
+if grep -q '^acme ' "$state/calls"; then fail 'empty Token reached ACME'; fi
+pass 'whitespace-only Cloudflare Token is rejected before any ACME invocation'
+new_dns_state actual-dns-failure
+touch "$state/acme-fail"
+if printf '%s\n\n' "$dns_test_token" | run ops-dns; then fail 'DNS-CF issue failure ignored'; fi
+expect grep -q 'Cloudflare DNS-01 issuance failed' "$state/output"
+if grep -RFq -- "$dns_test_token" "$state"; then fail 'CF Token leaked on issuance failure'; fi
+pass 'actual DNS-CF issue failure stops safely without leaking the input Token'
+unset dns_test_token dns_test_zone expected_dns_hash
 new_state actual-renewal
 mkdir "$state/acme"
 touch "$state/cron-running"

@@ -26,6 +26,8 @@ cd /opt/subscription-gateway && bash ./update.sh --pull
 
 首次安装过程中会交互填写 Gateway 主域名、Admin 端口、管理员用户名和证书方式。使用 Cloudflare DNS-01 时选择 `2`，然后按提示输入 Cloudflare API Token 和 Zone ID。
 
+Cloudflare DNS-01 安装时，API Token 会在当前交互终端中明文显示，输入前请确认没有录屏、共享终端或旁观人员。
+
 
 ### 一实例多入口域名（Schema v7）
 

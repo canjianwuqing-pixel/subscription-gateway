@@ -288,7 +288,7 @@ acquire_certificate() {
         chmod -R go-rwx "$(acme_home)"
     elif [[ $mode == dns-cf ]]; then
         acme=$(acme_binary)
-        read -r -s -p 'Cloudflare DNS API Token: ' token; printf '\n'
+        read -r -p 'Cloudflare DNS API Token: ' token
         token=$(printf '%s' "$token" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ -n $token ]] || die 'Cloudflare Token is empty'
         read -r -p 'Cloudflare Zone ID (blank if unnecessary): ' zone
