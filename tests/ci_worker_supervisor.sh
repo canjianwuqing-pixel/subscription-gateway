@@ -70,11 +70,19 @@ host_pid_before=$(docker inspect --format '{{.State.Pid}}' "$admin_id")
 cert_pid=$(compose exec -T admin cat /run/certificate-worker.pid)
 compose exec -T admin kill -STOP 1
 compose exec -T admin kill -KILL "$cert_pid"
+# Sending SIGKILL is asynchronous: wait for actual death before asserting health.
+# PID1 stays stopped so the supervisor cannot restart the container during this check.
+worker_dead=no
+for attempt in {1..50}; do
+    if compose exec -T admin php -r '$stat=@file_get_contents("/proc/".$argv[1]."/stat");exit(!is_string($stat)||preg_match("/\\) [ZX] /",$stat)?0:1);' "$cert_pid"; then worker_dead=yes; break; fi
+    sleep 0.1
+done
 dead_health=$(health_code)
 dead_check=0
 if run_setup_check "$temporary/setup-worker-dead.log"; then dead_check=1; fi
 compose exec -T admin kill -CONT 1
-[[ $dead_health == 503 && $dead_check == 0 ]] || fail 'dead/zombie certificate worker was not rejected by health and setup --check'
+printf 'Dead worker fixture: exited=%s health=%s setup_passed=%s\n' "$worker_dead" "$dead_health" "$dead_check"
+[[ $worker_dead == yes && $dead_health == 503 && $dead_check == 0 ]] || fail 'dead/zombie certificate worker was not rejected by health and setup --check'
 worker_pass 'dead/zombie certificate worker gives health 503 and actual setup --check fails'
 await_admin_restart "$restarts_before" "$host_pid_before"
 compose exec -T admin su-exec www-data php /app/src/cli.php domain-check
